@@ -13,7 +13,13 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
-const bot = new TelegramBot('8151366477:AAFKKXHB2JUnqVUbmug_kd5ClfV1m5PUbV4');
+const TelegramBot = require('node-telegram-bot-api');
+
+const bot = new TelegramBot('8151366477:AAFKKXHB2JUnqVUbmug_kd5ClfV1m5PUbV4', { polling: true });
+
+bot.on('message', (msg) => {
+  bot.sendMessage(msg.chat.id, 'تم استلام رسالتك!');
+});
 const connection = new Connection('https://proud-aged-flower.solana-mainnet.quiknode.pro/6c4369466a2cfc21c12af4a500501aa9b0093340', {
   commitment: 'confirmed',
   confirmTransactionInitialTimeout: 60000
