@@ -1,4 +1,3 @@
-
 import TelegramBot from 'node-telegram-bot-api';
 import bip39 from 'bip39';
 import * as ed25519 from 'ed25519-hd-key';
