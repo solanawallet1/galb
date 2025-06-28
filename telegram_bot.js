@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
-const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN);
+const bot = new TelegramBot('8151366477:AAFKKXHB2JUnqVUbmug_kd5ClfV1m5PUbV4');
 const connection = new Connection('https://proud-aged-flower.solana-mainnet.quiknode.pro/6c4369466a2cfc21c12af4a500501aa9b0093340', {
   commitment: 'confirmed',
   confirmTransactionInitialTimeout: 60000
