@@ -12,11 +12,8 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
-const bot = new TelegramBot('8151366477:AAFKKXHB2JUnqVUbmug_kd5ClfV1m5PUbV4', { polling: true });
+const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
 
-bot.on('message', (msg) => {
-  bot.sendMessage(msg.chat.id, 'تم استلام رسالتك!');
-});
 const connection = new Connection('https://proud-aged-flower.solana-mainnet.quiknode.pro/6c4369466a2cfc21c12af4a500501aa9b0093340', {
   commitment: 'confirmed',
   confirmTransactionInitialTimeout: 60000
@@ -551,105 +548,16 @@ bot.on('message', async (msg) => {
   }
 });
 
-// إعداد webhook
-const PORT = process.env.PORT || 5000;
-const WEBHOOK_PATH = '/webhook';
-
-// إضافة endpoint للتحقق من صحة السيرفر
-app.get('/', (req, res) => {
-  res.json({
-    status: 'running',
-    message: 'Telegram Bot is working!',
-    timestamp: new Date().toISOString(),
-    environment: process.env.REPLIT_DEPLOYMENT ? 'production' : 'development'
-  });
-});
-
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'healthy',
-    uptime: process.uptime(),
-    port: PORT,
-    webhook_path: WEBHOOK_PATH
-  });
-});
-
-app.post(WEBHOOK_PATH, (req, res) => {
-  console.log('📨 استقبال تحديث من تلجرام');
-  bot.processUpdate(req.body);
-  res.sendStatus(200);
-});
-
-// تشغيل السيرفر
-const server = app.listen(PORT, '0.0.0.0', async () => {
-  console.log(`🌐 السيرفر يعمل على المنفذ ${PORT}`);
-  console.log(`📡 مربوط على العنوان: 0.0.0.0:${PORT}`);
-  console.log(`📍 البيئة: ${process.env.REPLIT_DEPLOYMENT ? 'إنتاج' : 'تطوير'}`);
-
-  // انتظار قليل في بيئة الإنتاج للتأكد من جاهزية السيرفر
-  if (process.env.REPLIT_DEPLOYMENT) {
-    await sleep(3000);
-  } else {
-    await sleep(1000);
-  }
-
-  // تحديد URL الصحيح للـ webhook حسب البيئة
-  let webhookUrl;
-
-  if (process.env.REPLIT_DEPLOYMENT) {
-    // في بيئة الإنتاج - نحتاج لبناء URL مختلف
-    if (process.env.REPLIT_DEPLOYMENT_URL) {
-      webhookUrl = `${process.env.REPLIT_DEPLOYMENT_URL}${WEBHOOK_PATH}`;
-    } else {
-      // إذا لم يتوفر REPLIT_DEPLOYMENT_URL، استخدم النمط الافتراضي
-      const replId = process.env.REPLIT_DEPLOYMENT_ID || process.env.REPL_ID || 'unknown';
-      webhookUrl = `https://${replId}.replit.app${WEBHOOK_PATH}`;
-    }
-  } else if (process.env.REPLIT_DEV_DOMAIN) {
-    // في بيئة التطوير
-    webhookUrl = `https://${process.env.REPLIT_DEV_DOMAIN}${WEBHOOK_PATH}`;
-  } else {
-    // fallback للبيئة المحلية
-    const replName = process.env.REPL_SLUG || 'telegram-bot';
-    const replOwner = process.env.REPL_OWNER || 'user';
-    webhookUrl = `https://${replName}.${replOwner}.replit.app${WEBHOOK_PATH}`;
-  }
-
-  console.log('🔗 محاولة إعداد webhook:', webhookUrl);
-
-  try {
-    await bot.setWebHook(webhookUrl);
-    console.log('🤖 تم إعداد webhook بنجاح!');
-  } catch (error) {
-    console.error('❌ خطأ في إعداد webhook:', error.message);
-    console.log('🔄 محاولة إزالة webhook والإعداد مرة أخرى...');
-
-    try {
-      await bot.deleteWebHook();
-      await sleep(2000);
-      await bot.setWebHook(webhookUrl);
-      console.log('✅ تم إعداد webhook بنجاح بعد المحاولة الثانية');
-    } catch (retryError) {
-      console.error('❌ فشل في إعداد webhook:', retryError.message);
-      console.error('🌐 URL المستخدم:', webhookUrl);
-      console.error('📊 متغيرات البيئة المتاحة:');
-      console.error('- REPLIT_DEPLOYMENT:', !!process.env.REPLIT_DEPLOYMENT);
-      console.error('- REPLIT_DEPLOYMENT_URL:', !!process.env.REPLIT_DEPLOYMENT_URL);
-      console.error('- REPLIT_DEV_DOMAIN:', !!process.env.REPLIT_DEV_DOMAIN);
-    }
-  }
-});
-
-// معالجة أخطاء السيرفر
-server.on('error', (error) => {
-  console.error('❌ خطأ في السيرفر:', error);
-  if (error.code === 'EADDRINUSE') {
-    console.error(`🚫 المنفذ ${PORT} مستخدم بالفعل`);
-  }
-});
-
-server.on('listening', () => {
-  console.log('✅ السيرفر جاهز لاستقبال الطلبات');
-});
-
+// إزالة الـ webhook والاعتماد على polling فقط
 console.log('🤖 بوت تلجرام قيد التشغيل...');
+console.log('📡 يستخدم polling mode للاتصال مع تلجرام');
+
+// التأكد من إزالة أي webhook سابق
+(async () => {
+  try {
+    await bot.deleteWebHook();
+    console.log('✅ تم إزالة الـ webhook بنجاح');
+  } catch (error) {
+    console.log('ℹ️ لا يوجد webhook ليتم إزالته');
+  }
+})();
