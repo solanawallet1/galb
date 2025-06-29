@@ -12,7 +12,34 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
-const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
+const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { 
+  polling: {
+    interval: 1000,
+    autoStart: false,
+    params: {
+      timeout: 10
+    }
+  }
+});
+
+// معالجة أخطاء الـ polling
+bot.on('polling_error', (error) => {
+  console.log('⚠️ خطأ في الـ polling:', error.message);
+  
+  if (error.code === 'ETELEGRAM' && error.message.includes('409')) {
+    console.log('🔄 محاولة إعادة تشغيل البوت بعد 10 ثواني...');
+    bot.stopPolling();
+    setTimeout(() => {
+      bot.startPolling();
+    }, 10000);
+  }
+});
+
+// بدء الـ polling يدوياً بعد التأكد من إزالة الـ webhook
+setTimeout(() => {
+  bot.startPolling();
+  console.log('📡 تم بدء الـ polling');
+}, 3000);
 
 const connection = new Connection('https://proud-aged-flower.solana-mainnet.quiknode.pro/6c4369466a2cfc21c12af4a500501aa9b0093340', {
   commitment: 'confirmed',
@@ -552,12 +579,27 @@ bot.on('message', async (msg) => {
 console.log('🤖 بوت تلجرام قيد التشغيل...');
 console.log('📡 يستخدم polling mode للاتصال مع تلجرام');
 
-// التأكد من إزالة أي webhook سابق
+// التأكد من إزالة أي webhook سابق وإعادة تعيين البوت
 (async () => {
   try {
-    await bot.deleteWebHook();
+    // إزالة الـ webhook مع تنظيف pending updates
+    await bot.deleteWebHook({ drop_pending_updates: true });
     console.log('✅ تم إزالة الـ webhook بنجاح');
+    
+    // انتظار قصير قبل بدء الـ polling
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    // التحقق من حالة البوت
+    const me = await bot.getMe();
+    console.log(`🤖 البوت ${me.username} جاهز للعمل`);
+    
   } catch (error) {
-    console.log('ℹ️ لا يوجد webhook ليتم إزالته');
+    console.log('⚠️ خطأ في إعداد البوت:', error.message);
+    // محاولة إيقاف الـ polling وإعادة تشغيله
+    bot.stopPolling();
+    setTimeout(() => {
+      bot.startPolling();
+      console.log('🔄 تم إعادة تشغيل الـ polling');
+    }, 5000);
   }
 })();
