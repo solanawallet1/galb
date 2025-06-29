@@ -561,3 +561,12 @@ console.log('📡 يستخدم polling mode للاتصال مع تلجرام');
     console.log('ℹ️ لا يوجد webhook ليتم إزالته');
   }
 })();
+const http = require('http');
+const PORT = process.env.PORT || 3000;
+
+http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('🤖 Telegram bot is running.\n');
+}).listen(PORT, () => {
+  console.log(`🌐 HTTP server listening on port ${PORT}`);
+});
