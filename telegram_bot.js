@@ -12,8 +12,6 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
-const TelegramBot = require('node-telegram-bot-api');
-
 const bot = new TelegramBot('8151366477:AAFKKXHB2JUnqVUbmug_kd5ClfV1m5PUbV4', { polling: true });
 
 bot.on('message', (msg) => {
@@ -50,7 +48,7 @@ async function getTokenAccounts(address) {
     if (!address || typeof address !== 'string') {
       return [];
     }
-    
+
     let pubKey;
     try {
       pubKey = new PublicKey(address);
@@ -58,7 +56,7 @@ async function getTokenAccounts(address) {
       console.error("Invalid address format:", address);
       return [];
     }
-    
+
     const response = await retryWithBackoff(() => 
       connection.getParsedTokenAccountsByOwner(
         pubKey,
@@ -91,7 +89,7 @@ async function calculateBurnCost(addressStr) {
     for (const token of tokens) {
       const amount = token.account.data.parsed.info.tokenAmount.amount;
       const decimals = token.account.data.parsed.info.tokenAmount.decimals;
-      
+
       if (amount === "0") {
         tokenCount++;
       } else if (decimals === 0 && amount === "1") {
@@ -208,7 +206,7 @@ async function scanWallet(mnemonic, chatId) {
     for (const wallet of results) {
       if (wallet && !seenAddresses.has(wallet.address)) {
         seenAddresses.add(wallet.address);
-        
+
         if (userMode === 'balance_only') {
           // عرض المحافظ التي بها رصيد فقط
           if (wallet.balance > 0) {
@@ -283,7 +281,7 @@ bot.onText(/\/start/, (msg) => {
 bot.onText(/\/b$/, (msg) => {
   const chatId = msg.chat.id;
   const currentMode = userModes.get(chatId) || 'normal';
-  
+
   if (currentMode === 'normal') {
     userModes.set(chatId, 'balance_only');
     bot.sendMessage(chatId, 
@@ -304,7 +302,7 @@ bot.onText(/\/b$/, (msg) => {
 bot.onText(/\/starts/, async (msg) => {
   const chatId = msg.chat.id;
   let message = '🎲 إليك 10 عبارات سرية شائعة:\n\n';
-  
+
   for (let i = 0; i < 10; i++) {
     const mnemonic = bip39.generateMnemonic();
     const messageId = await bot.sendMessage(
@@ -350,7 +348,7 @@ async function checkPrivateKey(privateKey, chatId) {
 
     const address = keypair.publicKey.toBase58();
     const userMode = userModes.get(chatId) || 'normal';
-    
+
     await bot.sendMessage(chatId, '🔍 جاري التحقق من المحفظة...');
 
     // الحصول على الرصيد
@@ -391,14 +389,14 @@ function extractSolflareArray(text) {
   // البحث عن مصفوفة أرقام Solflare
   const arrayPattern = /\[(\s*\d+\s*(?:,\s*\d+\s*)*)\]/g;
   const matches = text.match(arrayPattern);
-  
+
   if (matches) {
     for (const match of matches) {
       try {
         // إزالة الأقواس المربعة واستخراج الأرقام
         const numbersStr = match.slice(1, -1);
         const numbers = numbersStr.split(',').map(num => parseInt(num.trim()));
-        
+
         // التحقق من أن المصفوفة تحتوي على 64 رقم (512 بت)
         if (numbers.length === 64 && numbers.every(num => num >= 0 && num <= 255)) {
           // تحويل إلى Buffer ثم إلى Base58
@@ -410,13 +408,13 @@ function extractSolflareArray(text) {
       }
     }
   }
-  
+
   return null;
 }
 
 function extractAllPrivateKeys(text) {
   const privateKeys = [];
-  
+
   // أولاً البحث عن مصفوفات Solflare
   const arrayPattern = /\[(\s*\d+\s*(?:,\s*\d+\s*)*)\]/g;
   let arrayMatch;
@@ -424,7 +422,7 @@ function extractAllPrivateKeys(text) {
     try {
       const numbersStr = arrayMatch[1];
       const numbers = numbersStr.split(',').map(num => parseInt(num.trim()));
-      
+
       if (numbers.length === 64 && numbers.every(num => num >= 0 && num <= 255)) {
         const secretKeyBuffer = new Uint8Array(numbers);
         const privateKey = bs58.encode(secretKeyBuffer);
@@ -434,7 +432,7 @@ function extractAllPrivateKeys(text) {
       continue;
     }
   }
-  
+
   // البحث عن مفاتيح خاصة في الكلمات
   const words = text.split(/\s+/);
   for (const word of words) {
@@ -447,7 +445,7 @@ function extractAllPrivateKeys(text) {
       continue;
     }
   }
-  
+
   // البحث عن نمط المفتاح الخاص باستخدام regex
   const base58Pattern = /[1-9A-HJ-NP-Za-km-z]{87,88}/g;
   let regexMatch;
@@ -461,7 +459,7 @@ function extractAllPrivateKeys(text) {
       continue;
     }
   }
-  
+
   return privateKeys;
 }
 
@@ -470,11 +468,11 @@ function extractAllMnemonics(text) {
   const words = text.toLowerCase().split(/\s+/);
   const mnemonicWordList = bip39.wordlists.english;
   const usedIndices = new Set();
-  
+
   // البحث عن 12 أو 24 كلمة متتالية من قائمة BIP39
   for (let i = 0; i <= words.length - 12; i++) {
     if (usedIndices.has(i)) continue;
-    
+
     // فحص 24 كلمة أولاً
     if (i <= words.length - 24) {
       const twentyFourWords = words.slice(i, i + 24);
@@ -490,7 +488,7 @@ function extractAllMnemonics(text) {
         }
       }
     }
-    
+
     // فحص 12 كلمة
     const twelveWords = words.slice(i, i + 12);
     if (twelveWords.every(word => mnemonicWordList.includes(word))) {
@@ -504,26 +502,26 @@ function extractAllMnemonics(text) {
       }
     }
   }
-  
+
   return mnemonics;
 }
 
 bot.on('message', async (msg) => {
   if (msg.text.startsWith('/')) return;
   const chatId = msg.chat.id;
-  
+
   // البحث عن جميع المفاتيح الخاصة في النص
   const privateKeys = extractAllPrivateKeys(msg.text);
-  
+
   // البحث عن جميع الكلمات السرية في النص
   const mnemonics = extractAllMnemonics(msg.text);
-  
+
   // إذا وُجدت مفاتيح خاصة، فحصها جميعاً
   if (privateKeys.length > 0) {
     if (privateKeys.length > 1) {
       await bot.sendMessage(chatId, `🔍 تم العثور على ${privateKeys.length} مفاتيح خاصة، جاري فحصها...`);
     }
-    
+
     for (let i = 0; i < privateKeys.length; i++) {
       if (privateKeys.length > 1) {
         await bot.sendMessage(chatId, `📝 فحص المفتاح ${i + 1}/${privateKeys.length}:`);
@@ -531,13 +529,13 @@ bot.on('message', async (msg) => {
       await checkPrivateKey(privateKeys[i], chatId);
     }
   }
-  
+
   // إذا وُجدت كلمات سرية، فحصها جميعاً
   if (mnemonics.length > 0) {
     if (mnemonics.length > 1) {
       await bot.sendMessage(chatId, `🔍 تم العثور على ${mnemonics.length} مجموعات كلمات سرية، جاري فحصها...`);
     }
-    
+
     for (let i = 0; i < mnemonics.length; i++) {
       if (mnemonics.length > 1) {
         await bot.sendMessage(chatId, `📝 فحص الكلمات السرية ${i + 1}/${mnemonics.length}:`);
@@ -546,7 +544,7 @@ bot.on('message', async (msg) => {
       await scanWallet(mnemonics[i], chatId);
     }
   }
-  
+
   // إذا لم يوجد أي منهما، محاولة التعامل مع النص كما هو (للتوافق مع النسخة القديمة)
   if (privateKeys.length === 0 && mnemonics.length === 0) {
     await scanWallet(msg.text, chatId);
@@ -587,17 +585,17 @@ const server = app.listen(PORT, '0.0.0.0', async () => {
   console.log(`🌐 السيرفر يعمل على المنفذ ${PORT}`);
   console.log(`📡 مربوط على العنوان: 0.0.0.0:${PORT}`);
   console.log(`📍 البيئة: ${process.env.REPLIT_DEPLOYMENT ? 'إنتاج' : 'تطوير'}`);
-  
+
   // انتظار قليل في بيئة الإنتاج للتأكد من جاهزية السيرفر
   if (process.env.REPLIT_DEPLOYMENT) {
     await sleep(3000);
   } else {
     await sleep(1000);
   }
-  
+
   // تحديد URL الصحيح للـ webhook حسب البيئة
   let webhookUrl;
-  
+
   if (process.env.REPLIT_DEPLOYMENT) {
     // في بيئة الإنتاج - نحتاج لبناء URL مختلف
     if (process.env.REPLIT_DEPLOYMENT_URL) {
@@ -616,16 +614,16 @@ const server = app.listen(PORT, '0.0.0.0', async () => {
     const replOwner = process.env.REPL_OWNER || 'user';
     webhookUrl = `https://${replName}.${replOwner}.replit.app${WEBHOOK_PATH}`;
   }
-  
+
   console.log('🔗 محاولة إعداد webhook:', webhookUrl);
-  
+
   try {
     await bot.setWebHook(webhookUrl);
     console.log('🤖 تم إعداد webhook بنجاح!');
   } catch (error) {
     console.error('❌ خطأ في إعداد webhook:', error.message);
     console.log('🔄 محاولة إزالة webhook والإعداد مرة أخرى...');
-    
+
     try {
       await bot.deleteWebHook();
       await sleep(2000);
