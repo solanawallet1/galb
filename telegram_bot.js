@@ -561,7 +561,7 @@ console.log('📡 يستخدم polling mode للاتصال مع تلجرام');
     console.log('ℹ️ لا يوجد webhook ليتم إزالته');
   }
 })();
-const http = require('http');
+import http from 'http';
 const PORT = process.env.PORT || 3000;
 
 http.createServer((req, res) => {
