@@ -14,7 +14,7 @@ app.use(express.json());
 
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
 
-const connection = new Connection('https://proud-aged-flower.solana-mainnet.quiknode.pro/6c4369466a2cfc21c12af4a500501aa9b0093340', {
+const connection = new Connection(process.evn.RPC_URL, {
   commitment: 'confirmed',
   confirmTransactionInitialTimeout: 60000
 });
