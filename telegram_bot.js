@@ -14,7 +14,7 @@ app.use(express.json());
 
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
 
-const connection = new Connection(process.evn.RPC_URL, {
+const connection = new Connection(process.env.RPC_URL, {
   commitment: 'confirmed',
   confirmTransactionInitialTimeout: 60000
 });
