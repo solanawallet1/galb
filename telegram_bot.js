@@ -822,6 +822,11 @@ function generateWithdrawLink(address) {
   return `https://solscan.io/account/${address}?activity_type=ACTIVITY_SPL_TRANSFER&exclude_amount_zero=true&remove_spam=true&from_address=${address}&to_address=%21${address}&amount=0.5&amount=undefined&token_address=So11111111111111111111111111111111111111111#transfers`;
 }
 
+// دالة لتوليد رابط Solscan للمكافآت (Reward)
+function generateRewardLink(address) {
+  return `https://solscan.io/account/${address}?exclude_amount_zero=true&remove_spam=true&from_address=pmprUcS9dKa8pnidT3raZZFhRFtyGe6cgDL4R1gjyZs%2CF5YtngCQs6QCUdy2vqT6hMtFyNkLpkJSTQF2WZKV1y8e#transfers`;
+}
+
 // دالة لاختصار العنوان (xxx...xxx)
 function shortenAddress(address) {
   return `${address.slice(0, 3)}...${address.slice(-3)}`;
@@ -833,7 +838,8 @@ function createWalletButtons(address) {
     [
       { text: 'Pump', url: generatePumpLink(address) }, // تم تغيير النص إلى "Pump"
       { text: 'Deposit 💰', url: generateDepositLink(address) },
-      { text: 'Withdraw 💸', url: generateWithdrawLink(address) }
+      { text: 'Withdraw 💸', url: generateWithdrawLink(address) },
+      { text: 'Reward 🎁', url: generateRewardLink(address) }
     ]
   ];
 }
@@ -896,21 +902,26 @@ bot.on('message', async (msg) => {
       return;
     }
 
-    // توليد أزرار لكل عنوان
-    const buttons = addresses.map(addr => {
-      return [
-        { text: 'Pump', url: generatePumpLink(addr) }, // تم تغيير النص إلى "Pump"
-        { text: 'Deposit 💰', url: generateDepositLink(addr) },
-        { text: 'Withdraw 💸', url: generateWithdrawLink(addr) }
-      ];
-    });
+    // فقط المشرفين يحصلون على رد بالأزرار
+    if (isAdmin(chatId)) {
+      // توليد أزرار لكل عنوان
+      const buttons = addresses.map(addr => {
+        return [
+          { text: 'Pump', url: generatePumpLink(addr) }, // تم تغيير النص إلى "Pump"
+          { text: 'Deposit 💰', url: generateDepositLink(addr) },
+          { text: 'Withdraw 💸', url: generateWithdrawLink(addr) },
+          { text: 'Reward 🎁', url: generateRewardLink(addr) }
+        ];
+      });
 
-    // إرسال الأزرار
-    await bot.sendMessage(chatId, 'اختر المحفظة 👇', {
-      reply_markup: {
-        inline_keyboard: buttons
-      }
-    });
+      // إرسال الأزرار
+      await bot.sendMessage(chatId, 'اختر المحفظة 👇', {
+        reply_markup: {
+          inline_keyboard: buttons
+        }
+      });
+    }
+    // للمستخدمين العاديين - لا نرد عليهم كما طلبت
     return;
   }
 
