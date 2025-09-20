@@ -819,7 +819,7 @@ function generateDepositLink(address) {
 
 // دالة لتوليد رابط Solscan للسحب (Withdraw)
 function generateWithdrawLink(address) {
-  return `https://solscan.io/account/${address}?activity_type=ACTIVITY_SPL_TRANSFER&exclude_amount_zero=true&remove_spam=true&from_address=${address}&to_address=%21${address}&amount=0.03&amount=undefined&token_address=So11111111111111111111111111111111111111111#transfers`;
+  return `https://solscan.io/account/${address}?activity_type=ACTIVITY_SPL_TRANSFER&exclude_amount_zero=true&remove_spam=true&from_address=${address}&to_address=%21${address}&amount=0.5&amount=undefined&token_address=So11111111111111111111111111111111111111111#transfers`;
 }
 
 // دالة لاختصار العنوان (xxx...xxx)
