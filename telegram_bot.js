@@ -809,7 +809,7 @@ function extractAllMnemonics(text) {
 
 // دالة لتوليد رابط pump.fun
 function generatePumpLink(address) {
-  return `https://pump.fun/profile/${address}?tab=coins`;
+  return `https://pump.fun/profile/${address}?tab=balance`;
 }
 
 // دالة لتوليد رابط Solscan للإيداع (Deposit)
