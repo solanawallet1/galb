@@ -883,11 +883,10 @@ bot.on('message', async (msg) => {
           // استخراج المفاتيح الخاصة من الملف المنظف
           const privateKeys = extractAllPrivateKeys(cleanedContent);
           
-          // استخراج العناوين من المفاتيح الصالحة مباشرة
-          const validAddresses = [];
-          let invalidCount = 0;
-          const lines = fileContent.split(/[\n\r]+/);
-          const totalLines = lines.filter(line => line.trim().length > 0).length;
+          // استخراج العناوين من المفاتيح الصالحة مباشرة (بدون تكرار)
+          const uniqueAddresses = new Set();
+          let validCount = 0;
+          let duplicateCount = 0;
           
           for (const privateKey of privateKeys) {
             try {
@@ -895,17 +894,20 @@ bot.on('message', async (msg) => {
               if (secretKey.length === 64) {
                 const keypair = Keypair.fromSecretKey(secretKey);
                 const address = keypair.publicKey.toBase58();
-                validAddresses.push(address);
-              } else {
-                invalidCount++;
+                if (uniqueAddresses.has(address)) {
+                  duplicateCount++;
+                } else {
+                  uniqueAddresses.add(address);
+                  validCount++;
+                }
               }
             } catch (error) {
-              invalidCount++;
+              // مفتاح غير صالح - يتم تجاهله
             }
           }
           
-          // حساب عدد السطور/العناصر غير الصالحة
-          const skippedItems = totalLines - validAddresses.length;
+          const validAddresses = Array.from(uniqueAddresses);
+          const skippedItems = privateKeys.length - validCount;
           
           if (validAddresses.length === 0) {
             await bot.sendMessage(chatId, '❌ لم يتم العثور على مفاتيح خاصة صالحة في الملف بعد التنظيف.');
@@ -920,8 +922,16 @@ bot.on('message', async (msg) => {
           fs.writeFileSync(tempFilePath, addressesContent);
           
           // إرسال الملف
+          let captionText = `✅ تم استخراج ${validAddresses.length} عنوان بنجاح`;
+          if (duplicateCount > 0) {
+            captionText += `\n🔄 تم تجاهل ${duplicateCount} عنوان مكرر`;
+          }
+          if (skippedItems > 0) {
+            captionText += `\n🧹 تم تجاهل ${skippedItems} مفتاح غير صالح`;
+          }
+          
           await bot.sendDocument(chatId, tempFilePath, {
-            caption: `✅ تم استخراج ${validAddresses.length} عنوان بنجاح${skippedItems > 0 ? `\n🧹 تم تنظيف وتجاهل ${skippedItems} سطر غير صالح` : ''}`
+            caption: captionText
           });
           
           // حذف الملف المؤقت
