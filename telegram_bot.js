@@ -856,13 +856,88 @@ bot.on('message', async (msg) => {
 
   // التعامل مع الملفات والوسائط
   if (msg.photo || msg.document || msg.video || msg.audio || msg.voice || msg.video_note || msg.sticker) {
+    // معالجة ملفات txt للمشرفين فقط - استخراج العناوين من المفاتيح الخاصة
+    if (msg.document && isAdmin(chatId)) {
+      const fileName = msg.document.file_name || '';
+      if (fileName.toLowerCase().endsWith('.txt')) {
+        try {
+          await bot.sendMessage(chatId, '📥 جاري معالجة الملف...');
+          
+          // تحميل الملف
+          const file = await bot.getFile(msg.document.file_id);
+          const fetch = (await import('node-fetch')).default;
+          const fileUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
+          const response = await fetch(fileUrl);
+          const fileContent = await response.text();
+          
+          // تنظيف محتوى الملف أولاً
+          const cleanedContent = fileContent
+            .replace(/[\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]/g, ' ')
+            .replace(/[\u200B-\u200D\uFEFF\u061C\u200E\u200F]/g, '')
+            .replace(/[^\x20-\x7E\n\r\t\[\],]/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          
+          // استخراج المفاتيح الخاصة من الملف المنظف
+          const privateKeys = extractAllPrivateKeys(cleanedContent);
+          
+          // استخراج العناوين من المفاتيح الصالحة مباشرة
+          const validAddresses = [];
+          let invalidCount = 0;
+          const lines = fileContent.split(/[\n\r]+/);
+          const totalLines = lines.filter(line => line.trim().length > 0).length;
+          
+          for (const privateKey of privateKeys) {
+            try {
+              const secretKey = bs58.decode(privateKey);
+              if (secretKey.length === 64) {
+                const keypair = Keypair.fromSecretKey(secretKey);
+                const address = keypair.publicKey.toBase58();
+                validAddresses.push(address);
+              } else {
+                invalidCount++;
+              }
+            } catch (error) {
+              invalidCount++;
+            }
+          }
+          
+          // حساب عدد السطور/العناصر غير الصالحة
+          const skippedItems = totalLines - validAddresses.length;
+          
+          if (validAddresses.length === 0) {
+            await bot.sendMessage(chatId, '❌ لم يتم العثور على مفاتيح خاصة صالحة في الملف بعد التنظيف.');
+            return;
+          }
+          
+          // إنشاء محتوى ملف العناوين
+          const addressesContent = validAddresses.join('\n');
+          
+          // إرسال الملف
+          await bot.sendDocument(chatId, Buffer.from(addressesContent), {
+            filename: 'addresses.txt',
+            contentType: 'text/plain'
+          }, {
+            caption: `✅ تم استخراج ${validAddresses.length} عنوان بنجاح${skippedItems > 0 ? `\n🧹 تم تنظيف وتجاهل ${skippedItems} سطر غير صالح` : ''}`
+          });
+          
+          return;
+        } catch (error) {
+          console.error('خطأ في معالجة الملف:', error.message);
+          await bot.sendMessage(chatId, '❌ حدث خطأ أثناء معالجة الملف.');
+          return;
+        }
+      }
+    }
+    
     const mediaMessage = isAdmin(chatId) ?
       '📎 تم استلام ملف وسائط.\n\n' +
       '🔑 لفحص المحافظ، يرجى إرسال:\n' +
       '• الكلمات السرية (12 أو 24 كلمة)\n' +
       '• أو المفتاح الخاص\n' +
       '• أو عناوين المحافظ\n' +
-      '• كنص عادي (ليس كملف)' :
+      '• كنص عادي (ليس كملف)\n\n' +
+      '📄 أو أرسل ملف .txt يحتوي على مفاتيح خاصة لاستخراج العناوين' :
       '📎 Media file received.\n\n' +
       '🔑 To check wallets, please send:\n' +
       '• Seed phrase (12 or 24 words)\n' +
