@@ -915,10 +915,10 @@ bot.on('message', async (msg) => {
           
           // إرسال الملف
           await bot.sendDocument(chatId, Buffer.from(addressesContent), {
+            caption: `✅ تم استخراج ${validAddresses.length} عنوان بنجاح${skippedItems > 0 ? `\n🧹 تم تنظيف وتجاهل ${skippedItems} سطر غير صالح` : ''}`
+          }, {
             filename: 'addresses.txt',
             contentType: 'text/plain'
-          }, {
-            caption: `✅ تم استخراج ${validAddresses.length} عنوان بنجاح${skippedItems > 0 ? `\n🧹 تم تنظيف وتجاهل ${skippedItems} سطر غير صالح` : ''}`
           });
           
           return;
