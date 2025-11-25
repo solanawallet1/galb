@@ -6,6 +6,8 @@ const { Keypair, Connection, PublicKey, TOKEN_PROGRAM_ID } = pkg;
 import bs58 from 'bs58';
 import dotenv from 'dotenv';
 import express from 'express';
+import fs from 'fs';
+import path from 'path';
 
 dotenv.config();
 
@@ -913,13 +915,17 @@ bot.on('message', async (msg) => {
           // إنشاء محتوى ملف العناوين
           const addressesContent = validAddresses.join('\n');
           
+          // حفظ الملف مؤقتاً ثم إرساله
+          const tempFilePath = path.join('/tmp', `addresses_${chatId}_${Date.now()}.txt`);
+          fs.writeFileSync(tempFilePath, addressesContent);
+          
           // إرسال الملف
-          await bot.sendDocument(chatId, Buffer.from(addressesContent), {
+          await bot.sendDocument(chatId, tempFilePath, {
             caption: `✅ تم استخراج ${validAddresses.length} عنوان بنجاح${skippedItems > 0 ? `\n🧹 تم تنظيف وتجاهل ${skippedItems} سطر غير صالح` : ''}`
-          }, {
-            filename: 'addresses.txt',
-            contentType: 'text/plain'
           });
+          
+          // حذف الملف المؤقت
+          fs.unlinkSync(tempFilePath);
           
           return;
         } catch (error) {
