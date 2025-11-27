@@ -120,16 +120,33 @@ async function getTokenAccounts(address) {
       return [];
     }
 
-    // استخدام RPC مباشرة مثل الكود الناجح
-    const result = await retryWithBackoff(() =>
-      rpc("getTokenAccountsByOwner", [
-        address,
-        { programId: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" },
-        { encoding: "jsonParsed" }
-      ])
-    );
+    // برامج التوكن المدعومة (SPL Token + Token-2022)
+    const tokenPrograms = [
+      "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",  // SPL Token Program
+      "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"   // Token-2022 Program
+    ];
 
-    return result?.value || [];
+    let allAccounts = [];
+
+    // فحص كلا البرنامجين
+    for (const programId of tokenPrograms) {
+      try {
+        const result = await retryWithBackoff(() =>
+          rpc("getTokenAccountsByOwner", [
+            address,
+            { programId: programId },
+            { encoding: "jsonParsed" }
+          ])
+        );
+        if (result?.value) {
+          allAccounts = allAccounts.concat(result.value);
+        }
+      } catch (err) {
+        console.error(`Error fetching ${programId}:`, err.message);
+      }
+    }
+
+    return allAccounts;
   } catch (error) {
     if (!error.message.includes('429')) {
       console.error("Error getting token accounts for address:", address, error.message);
