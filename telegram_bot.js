@@ -952,6 +952,64 @@ function createWalletButtons(address) {
   ];
 }
 
+// دالة لمعالجة الملفات المرفوعة واستخراج العناوين
+bot.on('document', async (msg) => {
+  const chatId = msg.chat.id;
+
+  if (!msg.document.file_name.endsWith('.txt')) {
+    return bot.sendMessage(chatId, '❌ يرجى إرسال ملف بصيغة .txt فقط.');
+  }
+
+  try {
+    const fileLink = await bot.getFileLink(msg.document.file_id);
+    const response = await axios.get(fileLink);
+    const content = response.data;
+    
+    // تقسيم المحتوى إلى أسطر وتنظيفها
+    const lines = content.split(/\r?\n/).map(line => line.trim()).filter(line => line.length > 0);
+    
+    if (lines.length === 0) {
+      return bot.sendMessage(chatId, '❌ الملف فارغ.');
+    }
+
+    await bot.sendMessage(chatId, `📂 جاري استخراج العناوين من ${lines.length} سطر...`);
+
+    const addresses = [];
+    for (const line of lines) {
+      try {
+        // التحقق مما إذا كان السطر مفتاحاً خاصاً لـ Solana (base58)
+        if (line.length >= 32 && line.length <= 128) {
+          const secretKey = bs58.decode(line);
+          if (secretKey.length === 64) {
+            const keypair = Keypair.fromSecretKey(secretKey);
+            addresses.push(keypair.publicKey.toBase58());
+          }
+        }
+      } catch (e) {
+        // تجاهل الأسطر التي ليست مفاتيح صالحة
+      }
+    }
+
+    if (addresses.length === 0) {
+      return bot.sendMessage(chatId, '❌ لم يتم العثور على مفاتيح خاصة صالحة في الملف.');
+    }
+
+    const outputContent = addresses.join('\n');
+    const outputPath = path.join('/tmp', `addresses_${chatId}.txt`);
+    fs.writeFileSync(outputPath, outputContent);
+
+    await bot.sendDocument(chatId, outputPath, {
+      caption: `✅ تم استخراج ${addresses.length} عنوان بنجاح.`
+    });
+
+    // حذف الملف المؤقت بعد الإرسال
+    fs.unlinkSync(outputPath);
+  } catch (error) {
+    console.error('Error processing document:', error);
+    bot.sendMessage(chatId, '❌ حدث خطأ أثناء معالجة الملف.');
+  }
+});
+
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const text = msg.text;
