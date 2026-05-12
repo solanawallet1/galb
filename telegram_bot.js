@@ -10,8 +10,52 @@ import fs from 'fs';
 import path from 'path';
 import { ethers } from 'ethers';
 import axios from 'axios';
+import { SocksProxyAgent } from 'socks-proxy-agent';
 
 dotenv.config();
+
+// قائمة بروكسيات SOCKS5 مجانية — يتم اختبارها عند الإقلاع واختيار أسرعها
+const PROXY_LIST = [
+  'socks5://206.123.156.178:4189',
+  'socks5://23.175.248.21:1080',
+  'socks5://43.255.157.95:8000',
+  'socks5://206.123.156.182:8339',
+  'socks5://206.123.156.188:15496',
+  'socks5://45.89.52.209:1080',
+  'socks5://124.248.190.48:1080',
+];
+
+let activeProxyAgent = null;
+
+async function findWorkingProxy() {
+  const fetch = (await import('node-fetch')).default;
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+
+  const tests = PROXY_LIST.map(async (proxyUrl) => {
+    try {
+      const agent = new SocksProxyAgent(proxyUrl);
+      const start = Date.now();
+      const res = await fetch(`https://api.telegram.org/bot${token}/getMe`, {
+        agent,
+        timeout: 8000
+      });
+      const data = await res.json();
+      const ms = Date.now() - start;
+      if (data.ok || data.error_code) {
+        return { proxyUrl, agent, ms, ok: !!data.ok };
+      }
+    } catch (_) {}
+    return null;
+  });
+
+  const results = (await Promise.all(tests)).filter(Boolean);
+  if (results.length === 0) return null;
+
+  results.sort((a, b) => a.ms - b.ms);
+  const best = results[0];
+  console.log(`✅ أفضل بروكسي: ${best.proxyUrl} (${best.ms}ms)`);
+  return best.agent;
+}
 
 const app = express();
 app.use(express.json());
@@ -1340,50 +1384,31 @@ app.get('/', (req, res) => {
   res.status(200).send('🤖 Telegram bot is running.');
 });
 
-// اختبار الاتصال بـ Telegram API
-async function testTelegramConnection() {
-  try {
-    const fetch = (await import('node-fetch')).default;
-    const token = process.env.TELEGRAM_BOT_TOKEN;
-    const res = await fetch(`https://api.telegram.org/bot${token}/getMe`, { timeout: 10000 });
-    const data = await res.json();
-    if (data.ok) {
-      console.log(`✅ الاتصال بـ Telegram API ناجح — البوت: @${data.result.username}`);
-      return true;
-    } else {
-      console.error('🔴 فشل getMe:', JSON.stringify(data));
-      return false;
-    }
-  } catch (err) {
-    console.error('🔴 لا يمكن الوصول إلى api.telegram.org:', err.message);
-    console.error('   → نوع الخطأ:', err.constructor.name);
-    if (err.cause) console.error('   → السبب:', err.cause);
-    return false;
-  }
-}
-
 app.listen(PORT, '0.0.0.0', async () => {
   console.log(`🌐 HTTP server listening on port ${PORT}`);
 
-  // اختبار الاتصال أولاً
-  const canReachTelegram = await testTelegramConnection();
-
   if (WEBHOOK_URL) {
-    if (canReachTelegram) {
+    // بيئة Render — نبحث عن بروكسي يصل لـ Telegram
+    console.log('🔍 جاري اختبار البروكسيات...');
+    activeProxyAgent = await findWorkingProxy();
+
+    if (activeProxyAgent) {
+      // تطبيق البروكسي على البوت
+      bot.options.request = { agent: activeProxyAgent };
+
       try {
         const fullWebhookUrl = `${WEBHOOK_URL}/webhook`;
         await bot.setWebHook(fullWebhookUrl);
         console.log(`✅ تم تسجيل الـ Webhook: ${fullWebhookUrl}`);
-        console.log('🤖 البوت يعمل عبر Webhook mode');
+        console.log('🤖 البوت يعمل عبر Webhook + Proxy');
       } catch (error) {
         console.error('🔴 فشل تسجيل الـ Webhook:', error.message);
-        if (error.cause) console.error('   → السبب:', error.cause);
       }
     } else {
-      console.warn('⚠️  الـ Webhook مسجل مسبقاً من الخارج — السيرفر جاهز لاستقبال التحديثات');
-      console.warn('⚠️  لكن إرسال الردود قد يفشل إذا كان api.telegram.org محجوباً من هذا الخادم');
+      console.error('🔴 جميع البروكسيات فاشلة — البوت لن يستطيع إرسال الردود');
     }
   } else {
+    // بيئة محلية (Replit) — polling مباشر
     bot.startPolling();
     console.log('🤖 البوت يعمل عبر Polling mode (بيئة محلية)');
   }
