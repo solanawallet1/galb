@@ -16,7 +16,7 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
-const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
+const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { webHook: false });
 
 // إنشاء اتصالات متعددة لتوزيع الأحمال
 const connections = [];
@@ -1272,25 +1272,40 @@ bot.on('message', async (msg) => {
   }
 });
 
-// إزالة الـ webhook والاعتماد على polling فقط
-console.log('🤖 بوت تلجرام قيد التشغيل...');
-console.log('📡 يستخدم polling mode للاتصال مع تلجرام');
-
-// التأكد من إزالة أي webhook سابق
-(async () => {
-  try {
-    await bot.deleteWebHook();
-    console.log('✅ تم إزالة الـ webhook بنجاح');
-  } catch (error) {
-    console.log('ℹ️ لا يوجد webhook ليتم إزالته');
-  }
-})();
-import http from 'http';
 const PORT = process.env.PORT || 5000;
+const WEBHOOK_URL = process.env.RENDER_EXTERNAL_URL || process.env.WEBHOOK_URL;
 
-http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('🤖 Telegram bot is running.\n');
-}).listen(PORT, '0.0.0.0', () => {
+// endpoint لاستقبال تحديثات Telegram
+app.post('/webhook', (req, res) => {
+  bot.processUpdate(req.body);
+  res.sendStatus(200);
+});
+
+// endpoint لفحص حالة السيرفر (للـ keep-alive)
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok', bot: 'running' });
+});
+
+app.get('/', (req, res) => {
+  res.status(200).send('🤖 Telegram bot is running.');
+});
+
+app.listen(PORT, '0.0.0.0', async () => {
   console.log(`🌐 HTTP server listening on port ${PORT}`);
+
+  if (WEBHOOK_URL) {
+    try {
+      const fullWebhookUrl = `${WEBHOOK_URL}/webhook`;
+      await bot.setWebHook(fullWebhookUrl);
+      console.log(`✅ تم تسجيل الـ Webhook: ${fullWebhookUrl}`);
+      console.log('🤖 بوت تلجرام يعمل عبر Webhook mode');
+    } catch (error) {
+      console.error('❌ فشل تسجيل الـ Webhook:', error.message);
+    }
+  } else {
+    // بيئة محلية (Replit) - نستخدم polling
+    await bot.deleteWebHook();
+    bot.startPolling();
+    console.log('🤖 بوت تلجرام يعمل عبر Polling mode (بيئة محلية)');
+  }
 });
