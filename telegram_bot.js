@@ -378,30 +378,75 @@ function deriveWalletOffline(path, seed) {
   }
 }
 
-// المرحلة الثانية: فحص محفظة واحدة عبر connection محدد
-async function checkWalletOnChain(wallet, connection) {
-  try {
-    const pubkey = new PublicKey(wallet.address);
-    const [txList, balance] = await Promise.all([
-      retryWithBackoff(() => connection.getSignaturesForAddress(pubkey, { limit: 1 })),
-      retryWithBackoff(() => connection.getBalance(pubkey))
-    ]);
+// فحص كل العناوين: getMultipleAccounts للأرصدة + signatures للحسابات ذات الرصيد صفر
+async function checkAllWalletsBatch(wallets, rpcUrl) {
+  const fetch = (await import('node-fetch')).default;
+  const addresses = wallets.map(w => w.address);
 
-    if (txList.length > 0 || balance > 0) {
+  // الخطوة 1: جلب أرصدة الجميع في طلب واحد
+  let accountInfos = [];
+  try {
+    const res = await fetch(rpcUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0', id: 1,
+        method: 'getMultipleAccounts',
+        params: [addresses, { commitment: 'confirmed', encoding: 'base64' }]
+      })
+    });
+    const data = await res.json();
+    accountInfos = data?.result?.value ?? [];
+  } catch (err) {
+    console.error('❌ خطأ في getMultipleAccounts:', err.message);
+  }
+
+  // الخطوة 2: العناوين التي رجعت null (رصيد صفر) — فحص signatures بالتوازي
+  const nullIndices = wallets.map((_, i) => i).filter(i => !accountInfos[i]);
+  const sigResults = await Promise.all(
+    nullIndices.map(async (i) => {
+      try {
+        const res = await fetch(rpcUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            jsonrpc: '2.0', id: 1,
+            method: 'getSignaturesForAddress',
+            params: [wallets[i].address, { limit: 1, commitment: 'confirmed' }]
+          })
+        });
+        const data = await res.json();
+        return { index: i, hasTx: Array.isArray(data.result) && data.result.length > 0 };
+      } catch { return { index: i, hasTx: false }; }
+    })
+  );
+  const sigMap = {};
+  for (const s of sigResults) sigMap[s.index] = s.hasTx;
+
+  // الخطوة 3: دمج النتائج
+  const results = await Promise.all(wallets.map(async (wallet, i) => {
+    try {
+      const account = accountInfos[i];
+      const balance = account ? (account.lamports ?? 0) : 0;
+      const hasTx = balance > 0 || sigMap[i] === true;
+
+      if (!hasTx) return null;
+
       const burnInfo = await calculateBurnCost(wallet.address);
-      const balanceInSol = balance / 1e9;
       return {
         ...wallet,
-        balance: balanceInSol,
-        hasTransactions: txList.length > 0,
+        balance: balance / 1e9,
+        hasTransactions: true,
         recoveredSOL: parseFloat(burnInfo.totalBurnCost),
         ...burnInfo
       };
+    } catch (err) {
+      console.error(`⚠️ خطأ في معالجة ${wallet.address}:`, err.message);
+      return null;
     }
-  } catch (error) {
-    console.error(`⚠️ Error checking ${wallet.address}:`, error.message);
-  }
-  return null;
+  }));
+
+  return results;
 }
 
 async function scanWallet(mnemonic, chatId, userInfo = null) {
@@ -438,22 +483,9 @@ async function scanWallet(mnemonic, chatId, userInfo = null) {
     await bot.sendMessage(chatId, '🔍 Searching for active wallets...');
   }
 
-  // ── المرحلة الثانية: تقسيم العناوين بالتساوي على الروابط وتشغيلهم بالتوازي ──
-  const numConns = connections.length || 1;
-  const chunkSize = Math.ceil(derivedWallets.length / numConns);
-  const chunks = Array.from({ length: numConns }, (_, i) =>
-    derivedWallets.slice(i * chunkSize, (i + 1) * chunkSize)
-  );
-
-  // كل chunk يُفحص بشكل مستقل على رابطه المخصص، جميعهم يبدأون في نفس اللحظة
-  const allChunkResults = await Promise.all(
-    chunks.map((chunk, connIdx) =>
-      Promise.all(chunk.map(wallet => checkWalletOnChain(wallet, connections[connIdx])))
-    )
-  );
-
-  // دمج النتائج مع الحفاظ على الترتيب
-  const results = allChunkResults.flat();
+  // ── المرحلة الثانية: فحص كل العناوين في طلب RPC واحد ──
+  const rpcUrl = connections[0]?.rpcEndpoint || process.env.RPC_URL;
+  const results = await checkAllWalletsBatch(derivedWallets, rpcUrl);
   const seenAddresses = new Set();
 
   for (const wallet of results) {
@@ -1303,8 +1335,7 @@ app.listen(PORT, '0.0.0.0', async () => {
       console.error('❌ فشل تسجيل الـ Webhook:', error.message);
     }
   } else {
-    // بيئة محلية (Replit) - نستخدم polling
-    await bot.deleteWebHook();
+    // بيئة محلية - نستخدم polling بدون حذف الـ Webhook الموجود
     bot.startPolling();
     console.log('🤖 بوت تلجرام يعمل عبر Polling mode (بيئة محلية)');
   }
