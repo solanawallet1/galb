@@ -1307,10 +1307,28 @@ bot.on('message', async (msg) => {
 const PORT = process.env.PORT || 5000;
 const WEBHOOK_URL = process.env.RENDER_EXTERNAL_URL || process.env.WEBHOOK_URL;
 
+// اعتراض أخطاء bot API (sendMessage وغيرها)
+bot.on('error', (error) => {
+  console.error('🔴 [bot error]', error.code || '', error.message);
+  if (error.response) {
+    console.error('   → HTTP status:', error.response.statusCode);
+    console.error('   → body:', JSON.stringify(error.response.body));
+  }
+});
+
+bot.on('polling_error', (error) => {
+  console.error('🔴 [polling error]', error.code || '', error.message);
+});
+
 // endpoint لاستقبال تحديثات Telegram
-app.post('/webhook', (req, res) => {
-  bot.processUpdate(req.body);
+app.post('/webhook', async (req, res) => {
   res.sendStatus(200);
+  try {
+    console.log('📩 [webhook] تحديث مستلم:', JSON.stringify(req.body).slice(0, 120));
+    bot.processUpdate(req.body);
+  } catch (err) {
+    console.error('🔴 [webhook] خطأ في processUpdate:', err.message);
+  }
 });
 
 // endpoint لفحص حالة السيرفر (للـ keep-alive)
@@ -1322,21 +1340,51 @@ app.get('/', (req, res) => {
   res.status(200).send('🤖 Telegram bot is running.');
 });
 
+// اختبار الاتصال بـ Telegram API
+async function testTelegramConnection() {
+  try {
+    const fetch = (await import('node-fetch')).default;
+    const token = process.env.TELEGRAM_BOT_TOKEN;
+    const res = await fetch(`https://api.telegram.org/bot${token}/getMe`, { timeout: 10000 });
+    const data = await res.json();
+    if (data.ok) {
+      console.log(`✅ الاتصال بـ Telegram API ناجح — البوت: @${data.result.username}`);
+      return true;
+    } else {
+      console.error('🔴 فشل getMe:', JSON.stringify(data));
+      return false;
+    }
+  } catch (err) {
+    console.error('🔴 لا يمكن الوصول إلى api.telegram.org:', err.message);
+    console.error('   → نوع الخطأ:', err.constructor.name);
+    if (err.cause) console.error('   → السبب:', err.cause);
+    return false;
+  }
+}
+
 app.listen(PORT, '0.0.0.0', async () => {
   console.log(`🌐 HTTP server listening on port ${PORT}`);
 
+  // اختبار الاتصال أولاً
+  const canReachTelegram = await testTelegramConnection();
+
   if (WEBHOOK_URL) {
-    try {
-      const fullWebhookUrl = `${WEBHOOK_URL}/webhook`;
-      await bot.setWebHook(fullWebhookUrl);
-      console.log(`✅ تم تسجيل الـ Webhook: ${fullWebhookUrl}`);
-      console.log('🤖 بوت تلجرام يعمل عبر Webhook mode');
-    } catch (error) {
-      console.error('❌ فشل تسجيل الـ Webhook:', error.message);
+    if (canReachTelegram) {
+      try {
+        const fullWebhookUrl = `${WEBHOOK_URL}/webhook`;
+        await bot.setWebHook(fullWebhookUrl);
+        console.log(`✅ تم تسجيل الـ Webhook: ${fullWebhookUrl}`);
+        console.log('🤖 البوت يعمل عبر Webhook mode');
+      } catch (error) {
+        console.error('🔴 فشل تسجيل الـ Webhook:', error.message);
+        if (error.cause) console.error('   → السبب:', error.cause);
+      }
+    } else {
+      console.warn('⚠️  الـ Webhook مسجل مسبقاً من الخارج — السيرفر جاهز لاستقبال التحديثات');
+      console.warn('⚠️  لكن إرسال الردود قد يفشل إذا كان api.telegram.org محجوباً من هذا الخادم');
     }
   } else {
-    // بيئة محلية - نستخدم polling بدون حذف الـ Webhook الموجود
     bot.startPolling();
-    console.log('🤖 بوت تلجرام يعمل عبر Polling mode (بيئة محلية)');
+    console.log('🤖 البوت يعمل عبر Polling mode (بيئة محلية)');
   }
 });
