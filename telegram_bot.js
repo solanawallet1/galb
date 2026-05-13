@@ -25,6 +25,9 @@ if (SOLANA_RPC_URLS.length > 0) {
   console.log(`✅ تم تحميل ${SOLANA_RPC_URLS.length} رابط RPC مخصص`);
 }
 
+// رابط RPC الافتراضي عند عدم وجود متغيرات بيئة
+const DEFAULT_RPC_URL = 'https://api.mainnet-beta.solana.com';
+
 // قائمة بروكسيات SOCKS5 مجانية — يتم اختبارها عند الإقلاع واختيار أسرعها
 const PROXY_LIST = [
   'socks5://206.123.156.178:4189',
@@ -271,10 +274,17 @@ async function retryWithBackoff(fn, maxRetries = 5, connectionsList = null) {
   }
 }
 
+// دالة للحصول على رابط RPC عشوائي من المتاح
+function getAnyRpcUrl() {
+  if (SOLANA_RPC_URLS.length > 0) return SOLANA_RPC_URLS[Math.floor(Math.random() * SOLANA_RPC_URLS.length)];
+  if (connections.length > 0) return connections[Math.floor(Math.random() * connections.length)].rpcEndpoint;
+  return process.env.RPC_URL || DEFAULT_RPC_URL;
+}
+
 // استعلام عبر RPC — طلب واحد
 async function rpc(method, params) {
   const fetch = (await import('node-fetch')).default;
-  const rpcUrl = connections[Math.floor(Math.random() * connections.length)]?.rpcEndpoint || process.env.RPC_URL;
+  const rpcUrl = getAnyRpcUrl();
   const res = await fetch(rpcUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -287,8 +297,8 @@ async function rpc(method, params) {
 // استعلام Batch — عدة طلبات في HTTP request واحد
 async function batchRpc(requests, retries = 5) {
   const fetch = (await import('node-fetch')).default;
-  const rpcUrl = connections[0]?.rpcEndpoint || process.env.RPC_URL;
   for (let attempt = 0; attempt < retries; attempt++) {
+    const rpcUrl = getAnyRpcUrl();
     try {
       const res = await fetch(rpcUrl, {
         method: 'POST',
@@ -417,7 +427,7 @@ function deriveWalletOffline(path, seed) {
 // فحص كل المحافظ — كل محفظة على رابطها المخصص، batch طلبَين (balance + signatures) لكل رابط
 async function checkAllWalletsBatch(wallets) {
   const fetch = (await import('node-fetch')).default;
-  const fallbackUrl = connections[0]?.rpcEndpoint || process.env.RPC_URL;
+  const fallbackUrl = connections[0]?.rpcEndpoint || process.env.RPC_URL || DEFAULT_RPC_URL;
 
   const checks = await Promise.all(
     wallets.map(async (wallet, i) => {
@@ -696,17 +706,15 @@ async function checkPrivateKey(privateKey, chatId) {
 
     await bot.sendMessage(chatId, '🔍 جاري التحقق من المحفظة...');
 
-    // الحصول على الرصيد
-    let connectionIndex = 0;
-    const getConnection = () => {
-      const conn = connections[connectionIndex % connections.length];
-      connectionIndex++;
-      return conn;
-    };
-
-    const balance = await retryWithBackoff(() =>
-      getConnection().getBalance(new PublicKey(address))
-    );
+    // الحصول على الرصيد عبر RPC مباشرة
+    const fetchMod = (await import('node-fetch')).default;
+    const balanceRes = await fetchMod(getAnyRpcUrl(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getBalance', params: [address, { commitment: 'confirmed' }] })
+    });
+    const balanceData = await balanceRes.json();
+    const balance = balanceData?.result?.value ?? 0;
 
     const balanceInSol = balance / 1e9;
 
